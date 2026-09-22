@@ -52,6 +52,38 @@ export class VietnameseTTS {
     return this.currentRate;
   }
 
+  private static preloadedKeys: Set<string> = new Set();
+
+  /**
+   * Tải trước ngầm (Preload/Prefetch) âm thanh của bài viết tiếp theo:
+   * - Kích hoạt Backend Render sinh trước file MP3 và lưu vào RAM Cache
+   * - Nạp trước vào browser cache để khi chuyển bài phát ngay lập tức (0s delay)
+   */
+  public static preloadArticleAudio(articleId: number, rank: number, voice?: string) {
+    if (!articleId) return;
+    const selectedVoice = voice || this.getVoice();
+    const key = `${articleId}_${rank}_${selectedVoice}`;
+    if (this.preloadedKeys.has(key)) return;
+    this.preloadedKeys.add(key);
+
+    const audioUrl = `${API_BASE}/tts/article/${articleId}?rank=${rank}&voice=${encodeURIComponent(selectedVoice)}`;
+
+    // 1. Tải ngầm bằng fetch để backend sinh xong và lưu vào RAM/Disk cache
+    fetch(audioUrl)
+      .then((res) => res.blob())
+      .catch(() => {});
+
+    // 2. Nạp trước qua thẻ Audio để trình duyệt decode & cache sẵn
+    try {
+      const preloader = new Audio();
+      preloader.preload = 'auto';
+      preloader.src = audioUrl;
+      preloader.load();
+    } catch {
+      // ignore
+    }
+  }
+
   /**
    * Phát âm thanh Tiếng Việt chuẩn 100% từ API backend:
    * - Tái sử dụng một instance Audio duy nhất để không bị trình duyệt chặn Autoplay khi chuyển bài
@@ -70,6 +102,7 @@ export class VietnameseTTS {
     // Tái sử dụng đối tượng Audio duy nhất đã được User Click cấp quyền
     if (!this.audio) {
       this.audio = new Audio();
+      this.audio.preload = 'auto';
     } else {
       try {
         this.audio.pause();
@@ -82,7 +115,7 @@ export class VietnameseTTS {
     const selectedVoice = voice || this.getVoice();
     const audioUrl = `${API_BASE}/tts/article/${articleId}?rank=${rank}&voice=${encodeURIComponent(selectedVoice)}`;
     audio.src = audioUrl;
-    audio.currentTime = 0;
+    audio.preload = 'auto';
     this.isPausedState = false;
 
     const applyRate = () => {

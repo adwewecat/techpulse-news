@@ -221,6 +221,9 @@ export const App: React.FC = () => {
       setIsLoading(true);
       const data = await fetchTop6hNews(undefined, 30);
       setTopArticles(data);
+      if (data.length > 0) {
+        VietnameseTTS.preloadArticleAudio(data[0].id, 1);
+      }
     } catch (err) {
       console.error('Error fetching 30 hot news:', err);
     } finally {
@@ -288,6 +291,17 @@ export const App: React.FC = () => {
     const rankIndex = stateRef.current.topArticles.findIndex((a) => a.id === article.id);
     const rankNum = rankIndex >= 0 ? rankIndex + 1 : 1;
 
+    // Tải trước ngầm (Preload) âm thanh bài viết kế tiếp để khi đọc xong bài hiện tại là có ngay lập tức
+    const remainingUnread = stateRef.current.topArticles.filter(
+      (a) => !stateRef.current.readIds.has(a.id) && a.id !== article.id
+    );
+    if (remainingUnread.length > 0) {
+      const nextArticle = remainingUnread[0];
+      const nextRankIndex = stateRef.current.topArticles.findIndex((a) => a.id === nextArticle.id);
+      const nextRankNum = nextRankIndex >= 0 ? nextRankIndex + 1 : 1;
+      VietnameseTTS.preloadArticleAudio(nextArticle.id, nextRankNum, stateRef.current.selectedVoice);
+    }
+
     VietnameseTTS.playArticleAudio(
       article.id,
       rankNum,
@@ -307,15 +321,16 @@ export const App: React.FC = () => {
           const updatedReadSet = new Set(stateRef.current.readIds);
           updatedReadSet.add(article.id);
 
-          const remainingUnread = stateRef.current.topArticles.filter(
+          const nextUnreadList = stateRef.current.topArticles.filter(
             (a) => !updatedReadSet.has(a.id)
           );
 
-          if (remainingUnread.length > 0) {
-            const nextArticle = remainingUnread[0];
+          if (nextUnreadList.length > 0) {
+            const nextArticle = nextUnreadList[0];
+            // Khoảng nghỉ tự nhiên 200ms (như phát thanh viên thở nhẹ chuyển câu)
             setTimeout(() => {
               handlePlayArticle(nextArticle);
-            }, 600);
+            }, 200);
           } else {
             showToast('🎉 Đã nghe xong toàn bộ các tin hot!');
           }
