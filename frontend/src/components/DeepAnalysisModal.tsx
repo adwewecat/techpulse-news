@@ -97,6 +97,9 @@ export const DeepAnalysisModal: React.FC<DeepAnalysisModalProps> = ({
     // Phát âm thanh Tiếng Việt chuẩn 100% từ API backend (Neural TTS Hoài My/Nam Minh)
     const audioUrl = `${API_BASE}/tts/deep-analysis/${article.id}?voice=${encodeURIComponent(VietnameseTTS.getVoice())}`;
     const audio = new Audio(audioUrl);
+    audio.preload = 'auto';
+    audio.setAttribute('playsinline', 'true');
+    audio.setAttribute('webkit-playsinline', 'true');
     setAudioElement(audio);
 
     // Áp dụng tốc độ đọc mong muốn từ người dùng

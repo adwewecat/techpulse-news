@@ -85,8 +85,30 @@ export class VietnameseTTS {
   }
 
   /**
+   * Khởi tạo các sự kiện MediaSession (điều khiển trên màn hình khóa điện thoại Android / iOS / Dynamic Island)
+   */
+  public static initMediaSession(handlers: {
+    onPlay?: () => void;
+    onPause?: () => void;
+    onNext?: () => void;
+    onStop?: () => void;
+  }) {
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        if (handlers.onPlay) navigator.mediaSession.setActionHandler('play', handlers.onPlay);
+        if (handlers.onPause) navigator.mediaSession.setActionHandler('pause', handlers.onPause);
+        if (handlers.onNext) navigator.mediaSession.setActionHandler('nexttrack', handlers.onNext);
+        if (handlers.onStop) navigator.mediaSession.setActionHandler('stop', handlers.onStop);
+      } catch (e) {
+        console.warn('Lỗi cấu hình mediaSession handlers:', e);
+      }
+    }
+  }
+
+  /**
    * Phát âm thanh Tiếng Việt chuẩn 100% từ API backend:
-   * - Tái sử dụng một instance Audio duy nhất để không bị trình duyệt chặn Autoplay khi chuyển bài
+   * - Tái sử dụng một instance Audio duy nhất đã được User Click cấp quyền
+   * - Hỗ trợ phát ngầm khi tắt màn hình điện thoại (Mobile Background Playback & MediaSession)
    * - Giọng đọc Tiếng Việt tự nhiên Neural siêu mượt (Hoài My Nữ, Nam Minh Nam, Google)
    * - Tự động dịch tiêu đề/nội dung sang Tiếng Việt nếu là tin quốc tế
    * - Hỗ trợ chọn tốc độ đọc (1.0x, 1.25x, 1.5x, 1.75x, 2.0x)
@@ -95,6 +117,7 @@ export class VietnameseTTS {
     articleId: number,
     rank: number,
     voice?: string,
+    articleTitle?: string,
     onStart?: () => void,
     onEnd?: () => void,
     onError?: (err: any) => void
@@ -103,6 +126,9 @@ export class VietnameseTTS {
     if (!this.audio) {
       this.audio = new Audio();
       this.audio.preload = 'auto';
+      // Thuộc tính quan trọng cho iOS/Android chạy âm thanh inline và không bị ngắt khi tắt màn hình
+      this.audio.setAttribute('playsinline', 'true');
+      this.audio.setAttribute('webkit-playsinline', 'true');
     } else {
       try {
         this.audio.pause();
@@ -118,6 +144,24 @@ export class VietnameseTTS {
     audio.preload = 'auto';
     this.isPausedState = false;
 
+    // Cập nhật thông tin lên Màn hình khóa điện thoại (Lock Screen Widget trên iOS / Android)
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: articleTitle ? `[#${rank}] ${articleTitle}` : `Tin số #${rank}`,
+          artist: 'TECH PULSE - AI News Radio',
+          album: 'Bản tin AI & Công nghệ nổi bật',
+          artwork: [
+            { src: '/favicon.svg', sizes: '96x96', type: 'image/svg+xml' },
+            { src: '/icons.svg', sizes: '192x192', type: 'image/svg+xml' },
+          ],
+        });
+        navigator.mediaSession.playbackState = 'playing';
+      } catch {
+        // ignore
+      }
+    }
+
     const applyRate = () => {
       try {
         audio.playbackRate = this.getPlaybackRate();
@@ -131,7 +175,16 @@ export class VietnameseTTS {
 
     audio.onplay = () => {
       applyRate();
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'playing';
+      }
       if (onStart) onStart();
+    };
+
+    audio.onpause = () => {
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator && this.isPausedState) {
+        navigator.mediaSession.playbackState = 'paused';
+      }
     };
 
     audio.onended = () => {
@@ -171,6 +224,9 @@ export class VietnameseTTS {
     if (this.audio && !this.audio.paused) {
       this.audio.pause();
       this.isPausedState = true;
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused';
+      }
     }
   }
 
@@ -181,6 +237,9 @@ export class VietnameseTTS {
         playPromise.catch(() => {});
       }
       this.isPausedState = false;
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'playing';
+      }
     }
   }
 
@@ -194,6 +253,9 @@ export class VietnameseTTS {
         // ignore
       }
       this.isPausedState = false;
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'none';
+      }
     }
   }
 

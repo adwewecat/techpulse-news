@@ -306,6 +306,7 @@ export const App: React.FC = () => {
       article.id,
       rankNum,
       stateRef.current.selectedVoice,
+      article.title,
       () => {
         // onStart
         setIsPaused(false);
@@ -327,10 +328,16 @@ export const App: React.FC = () => {
 
           if (nextUnreadList.length > 0) {
             const nextArticle = nextUnreadList[0];
-            // Khoảng nghỉ tự nhiên 200ms (như phát thanh viên thở nhẹ chuyển câu)
-            setTimeout(() => {
+            // KHI TẮT MÀN HÌNH HOẶC CHUYỂN TAB TRÊN ĐIỆN THOẠI (document.hidden):
+            // Phải phát bài tiếp theo ngay lập tức không qua setTimeout
+            // để hệ điều hành iOS/Android không đình chỉ tab và duy trì âm thanh liên tục trong nền!
+            if (typeof document !== 'undefined' && document.hidden) {
               handlePlayArticle(nextArticle);
-            }, 200);
+            } else {
+              setTimeout(() => {
+                handlePlayArticle(nextArticle);
+              }, 150);
+            }
           } else {
             showToast('🎉 Đã nghe xong toàn bộ các tin hot!');
           }
@@ -384,6 +391,16 @@ export const App: React.FC = () => {
       showToast('Không còn tin chưa đọc tiếp theo');
     }
   };
+
+  // Khởi tạo điều khiển MediaSession (màn hình khóa iOS/Android & tai nghe Bluetooth)
+  useEffect(() => {
+    VietnameseTTS.initMediaSession({
+      onPlay: () => handleResume(),
+      onPause: () => handlePause(),
+      onNext: () => handleNext(),
+      onStop: () => handleStop(),
+    });
+  });
 
   // Toggle read/unread status
   const handleToggleRead = (id: number) => {
