@@ -218,12 +218,12 @@ async def run_crawl_cycle(storage_instance: Optional[JSONStorage] = None) -> Opt
                     if body_extra and len(body_extra) > len(summary_raw):
                         summary_raw = body_extra
 
-                # Tự động dịch sang Tiếng Việt nếu là tin quốc tế hoặc văn bản tiếng Anh
-                from app.api.tts import is_english_text, translate_to_vietnamese
-                if src.get("region") == "world" or src.get("category") == "tech_world" or is_english_text(title) or is_english_text(summary_raw):
-                    if is_english_text(title):
+                # Tự động dịch sang Tiếng Việt nếu là tin quốc tế hoặc văn bản chưa có dấu tiếng Việt
+                from app.api.tts import is_vietnamese_text, translate_to_vietnamese
+                if src.get("region") == "world" or src.get("category") == "tech_world" or not is_vietnamese_text(title) or not is_vietnamese_text(summary_raw):
+                    if not is_vietnamese_text(title):
                         title = await translate_to_vietnamese(title, client)
-                    if is_english_text(summary_raw):
+                    if not is_vietnamese_text(summary_raw):
                         summary_raw = await translate_to_vietnamese(summary_raw, client)
 
                 # 1. Pipeline AI: Lọc rác + Tóm tắt + Auto-tags

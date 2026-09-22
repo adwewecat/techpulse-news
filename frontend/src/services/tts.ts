@@ -56,8 +56,8 @@ export class VietnameseTTS {
 
   /**
    * Tải trước ngầm (Preload/Prefetch) âm thanh của bài viết tiếp theo:
-   * - Kích hoạt Backend Render sinh trước file MP3 và lưu vào RAM Cache
-   * - Nạp trước vào browser cache để khi chuyển bài phát ngay lập tức (0s delay)
+   * - Kích hoạt Backend Render sinh trước file MP3 và lưu vào RAM/Disk Cache
+   * - Chỉ dùng 1 request fetch duy nhất, không tạo thẻ Audio trùng lặp gây nghẽn kết nối
    */
   public static preloadArticleAudio(articleId: number, rank: number, voice?: string) {
     if (!articleId) return;
@@ -68,20 +68,17 @@ export class VietnameseTTS {
 
     const audioUrl = `${API_BASE}/tts/article/${articleId}?rank=${rank}&voice=${encodeURIComponent(selectedVoice)}`;
 
-    // 1. Tải ngầm bằng fetch để backend sinh xong và lưu vào RAM/Disk cache
+    // Tải ngầm bằng fetch để backend sinh xong và lưu vào RAM/Disk cache
     fetch(audioUrl)
-      .then((res) => res.blob())
-      .catch(() => {});
-
-    // 2. Nạp trước qua thẻ Audio để trình duyệt decode & cache sẵn
-    try {
-      const preloader = new Audio();
-      preloader.preload = 'auto';
-      preloader.src = audioUrl;
-      preloader.load();
-    } catch {
-      // ignore
-    }
+      .then((res) => {
+        if (!res.ok) {
+          // Nếu có lỗi, cho phép preload lại lần sau
+          this.preloadedKeys.delete(key);
+        }
+      })
+      .catch(() => {
+        this.preloadedKeys.delete(key);
+      });
   }
 
   /**
@@ -138,11 +135,36 @@ export class VietnameseTTS {
     }
 
     const audio = this.audio;
+
+    // 1. Dọn dẹp toàn bộ listeners cũ trước khi gán bài mới để tránh kích hoạt chéo
+    audio.onloadedmetadata = null;
+    audio.oncanplay = null;
+    audio.onplay = null;
+    audio.onpause = null;
+    audio.onended = null;
+    audio.onerror = null;
+
     const selectedVoice = voice || this.getVoice();
     const audioUrl = `${API_BASE}/tts/article/${articleId}?rank=${rank}&voice=${encodeURIComponent(selectedVoice)}`;
+
+    // 2. QUAN TRỌNG: Reset thời gian currentTime = 0 trước khi nạp nguồn mới
+    // Tránh việc trình duyệt mang thời lượng bài cũ sang bài mới làm kẹt (stalled) hoặc đơ
+    try {
+      audio.currentTime = 0;
+    } catch {
+      // ignore
+    }
+
     audio.src = audioUrl;
     audio.preload = 'auto';
     this.isPausedState = false;
+
+    // 3. Tải nguồn mới chuẩn HTML5
+    try {
+      audio.load();
+    } catch {
+      // ignore
+    }
 
     // Cập nhật thông tin lên Màn hình khóa điện thoại (Lock Screen Widget trên iOS / Android)
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
@@ -193,7 +215,7 @@ export class VietnameseTTS {
     };
 
     audio.onerror = (e) => {
-      // Nếu là MEDIA_ERR_ABORTED (mã 1), do chuyển bài hoặc đổi giọng, không phải lỗi thực tế
+      // Nếu là MEDIA_ERR_ABORTED (mã 1), do chuyển bài hoặc đổi giọng chủ động, bỏ qua
       if (audio.error && audio.error.code === 1) {
         return;
       }

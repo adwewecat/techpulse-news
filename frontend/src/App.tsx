@@ -291,25 +291,24 @@ export const App: React.FC = () => {
     const rankIndex = stateRef.current.topArticles.findIndex((a) => a.id === article.id);
     const rankNum = rankIndex >= 0 ? rankIndex + 1 : 1;
 
-    // Tải trước ngầm (Preload) âm thanh bài viết kế tiếp để khi đọc xong bài hiện tại là có ngay lập tức
-    const remainingUnread = stateRef.current.topArticles.filter(
-      (a) => !stateRef.current.readIds.has(a.id) && a.id !== article.id
-    );
-    if (remainingUnread.length > 0) {
-      const nextArticle = remainingUnread[0];
-      const nextRankIndex = stateRef.current.topArticles.findIndex((a) => a.id === nextArticle.id);
-      const nextRankNum = nextRankIndex >= 0 ? nextRankIndex + 1 : 1;
-      VietnameseTTS.preloadArticleAudio(nextArticle.id, nextRankNum, stateRef.current.selectedVoice);
-    }
-
+    // Play audio for current article
     VietnameseTTS.playArticleAudio(
       article.id,
       rankNum,
       stateRef.current.selectedVoice,
       article.title,
       () => {
-        // onStart
+        // onStart: Khi bài hiện tại bắt đầu phát ổn định, kích hoạt preload ngầm bài kế tiếp
         setIsPaused(false);
+        const remainingUnread = stateRef.current.topArticles.filter(
+          (a) => !stateRef.current.readIds.has(a.id) && a.id !== article.id
+        );
+        if (remainingUnread.length > 0) {
+          const nextArticle = remainingUnread[0];
+          const nextRankIndex = stateRef.current.topArticles.findIndex((a) => a.id === nextArticle.id);
+          const nextRankNum = nextRankIndex >= 0 ? nextRankIndex + 1 : 1;
+          VietnameseTTS.preloadArticleAudio(nextArticle.id, nextRankNum, stateRef.current.selectedVoice);
+        }
       },
       () => {
         // onEnd: Phát xong 1 lần -> Đánh dấu là tin đã đọc -> Chuyển qua tab Đã đọc
@@ -346,7 +345,25 @@ export const App: React.FC = () => {
       (err) => {
         console.error('Speech error:', err);
         setPlayingArticleId(null);
-        showToast('⚠️ Không thể phát âm thanh bài này.');
+        showToast('⚠️ Không thể phát âm thanh tin này, tự động chuyển tiếp...');
+
+        // Tự động bỏ qua tin bị lỗi và phát tiếp tin kế tiếp, tránh việc toàn bộ danh sách bị đơ/dừng
+        if (stateRef.current.autoplayNext) {
+          markAsRead(article.id);
+          const updatedReadSet = new Set(stateRef.current.readIds);
+          updatedReadSet.add(article.id);
+
+          const nextUnreadList = stateRef.current.topArticles.filter(
+            (a) => !updatedReadSet.has(a.id)
+          );
+
+          if (nextUnreadList.length > 0) {
+            const nextArticle = nextUnreadList[0];
+            setTimeout(() => {
+              handlePlayArticle(nextArticle);
+            }, 600);
+          }
+        }
       }
     );
   }, [markAsRead]);

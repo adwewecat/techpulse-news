@@ -18872,8 +18872,8 @@
         "dự báo"
       ],
       "published_at": "2026-09-21T22:11:34.462200+07:00",
-      "hot_score": 32.6,
-      "velocity_score": 10.0,
+      "hot_score": 14.6,
+      "velocity_score": 4.0,
       "badge": "normal",
       "is_spam": false,
       "is_primary": true,
@@ -18881,7 +18881,7 @@
       "special_date": "2026-09-21",
       "id": 959,
       "created_at": "2026-09-21T15:11:35.443260",
-      "click_count": 3
+      "click_count": 4
     },
     {
       "url": "special://gold-price/2026-09-21",

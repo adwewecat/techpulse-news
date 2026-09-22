@@ -2,7 +2,7 @@
 chcp 65001 >nul
 title TechPulse - Backend FastAPI (Port 8002)
 cd /d "%~dp0"
-set "PATH=C:\Program Files\nodejs;%LOCALAPPDATA%\Programs\Python\Python314;%LOCALAPPDATA%\Programs\Python\Python314\Scripts;%PATH%"
+set "PATH=C:\Program Files\nodejs;%APPDATA%\Python\Python314\Scripts;C:\Program Files\Python314;C:\Program Files\Python314\Scripts;%LOCALAPPDATA%\Programs\Python\Python314;%LOCALAPPDATA%\Programs\Python\Python314\Scripts;%PATH%"
 set "PYTHONPATH=%~dp0"
 set "PYTHONIOENCODING=utf-8"
 echo ===================================================
