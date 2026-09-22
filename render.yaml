@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: techpulse-backend
+    runtime: python
+    region: singapore
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CRAWL_INTERVAL_MINUTES
+        value: "30"
+      - key: GEMINI_API_KEY
+        sync: false

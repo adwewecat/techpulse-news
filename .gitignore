@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+.venv/
+venv/
+ENV/
+env/
+
+# Build outputs
+dist/
+frontend/dist/
+dist-ssr/
+*.local
+
+# Python cache & logs
+__pycache__/
+backend/**/__pycache__/
+*.py[cod]
+*$py.class
+*.log
+logs/
+
+# Sensitive environment variables
+.env
+backend/.env
+frontend/.env
+*.env.local
+
+# TTS Audio Cache files (avoid bloating git repo with generated mp3s)
+backend/data/audio_cache/*.mp3
+backend/data/audio_cache/*.wav
+!backend/data/audio_cache/.gitkeep
+
+# Operating system & IDE files
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
