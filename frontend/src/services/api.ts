@@ -1,6 +1,7 @@
 import type { Article, NewsListResponse, CrawlStatus, StatsOverview } from '../types/news';
 
-export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
+const rawBase = (import.meta.env.VITE_API_BASE_URL || '/api').trim().replace(/\/+$/, '');
+export const API_BASE = rawBase.endsWith('/api') ? rawBase : `${rawBase}/api`;
 
 export async function fetchNews(params: {
   region?: string;
