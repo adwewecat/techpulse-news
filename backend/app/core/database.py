@@ -1,8 +1,13 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from app.core.config import settings
-
-Base = declarative_base()
+try:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import declarative_base, sessionmaker, Session
+    Base = declarative_base()
+except ImportError:
+    create_engine = None
+    declarative_base = None
+    sessionmaker = None
+    Session = None
+    Base = object
 
 if settings.DATABASE_URL:
     engine = create_engine(
