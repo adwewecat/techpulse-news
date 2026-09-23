@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
   fetchTop6hNews, fetchCrawlStatus, fetchStats, 
-  recordArticleClick, triggerCrawlNow, toggleStarArticle, cleanupReadData 
+  recordArticleClick, triggerCrawlNow, toggleStarArticle, cleanupReadData,
+  getOrCreateUserId, markUserReadApi, markUserUnreadApi, syncUserReadsApi,
+  clearUserReadsApi, fetchUserReadArticles
 } from './services/api';
 import { VietnameseTTS } from './services/tts';
 import type { Article, CrawlStatus, StatsOverview } from './types/news';
@@ -20,8 +22,13 @@ const STORAGE_STARRED_KEY = 'tech_pulse_starred_ids_v1';
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const App: React.FC = () => {
+  // Anonymous guest user ID (no login required, auto-cached)
+  const [userId] = useState<string>(() => getOrCreateUserId());
+
   // State for raw 30 top articles from backend
   const [topArticles, setTopArticles] = useState<Article[]>([]);
+  // State for read articles fetched from backend
+  const [readArticlesList, setReadArticlesList] = useState<Article[]>([]);
 
   // Starred article IDs
   const [starredIds, setStarredIds] = useState<Set<number>>(() => {
@@ -164,6 +171,9 @@ export const App: React.FC = () => {
 
   // Mark article as read (Chỉ lưu trữ 30 ngày)
   const markAsRead = useCallback((id: number) => {
+    // Lưu tức thì lên backend cho người dùng ẩn danh
+    markUserReadApi(userId, id);
+
     setReadMap((prev) => {
       const next = new Map(prev);
       next.set(id, Date.now());
@@ -182,10 +192,13 @@ export const App: React.FC = () => {
       }
       return next;
     });
-  }, []);
+  }, [userId]);
 
   // Mark article as unread (undo)
   const markAsUnread = (id: number) => {
+    // Hoàn tác trên backend cho người dùng ẩn danh
+    markUserUnreadApi(userId, id);
+
     setReadMap((prev) => {
       const next = new Map(prev);
       next.delete(id);
@@ -206,20 +219,24 @@ export const App: React.FC = () => {
   // Clear all read history
   const clearReadHistory = () => {
     if (window.confirm('Bạn có muốn đặt lại toàn bộ danh sách đã đọc không?')) {
+      clearUserReadsApi(userId);
       setReadMap(new Map());
+      setReadArticlesList([]);
       try {
         localStorage.removeItem(STORAGE_READ_ITEMS_KEY);
       } catch {}
       cleanupReadData(30).catch(() => {});
       showToast('Đã làm mới danh sách tin đã đọc');
+      // Tải lại 30 tin hot bao gồm cả các tin vừa làm mới
+      load30HotNews();
     }
   };
 
-  // Load 30 top articles from backend
+  // Load 30 top articles from backend (loại trừ các tin đã đọc của user)
   const load30HotNews = useCallback(async () => {
     try {
       setIsLoading(true);
-      const data = await fetchTop6hNews(undefined, 30);
+      const data = await fetchTop6hNews(undefined, 30, userId, true);
       setTopArticles(data);
       if (data.length > 0) {
         VietnameseTTS.preloadArticleAudio(data[0].id, 1);
@@ -229,7 +246,47 @@ export const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [userId]);
+
+  // Đồng bộ lịch sử đọc 2 chiều giữa client và backend server khi mở trang
+  useEffect(() => {
+    const localIds = Array.from(readMap.keys());
+    syncUserReadsApi(userId, localIds).then((mergedIds) => {
+      if (mergedIds && mergedIds.length > 0) {
+        setReadMap((prev) => {
+          const next = new Map(prev);
+          const now = Date.now();
+          let changed = false;
+          mergedIds.forEach((id) => {
+            if (!next.has(id)) {
+              next.set(id, now);
+              changed = true;
+            }
+          });
+          if (changed) {
+            const prunedArray: { id: number; readAt: number }[] = [];
+            next.forEach((readAt, artId) => prunedArray.push({ id: artId, readAt }));
+            try {
+              localStorage.setItem(STORAGE_READ_ITEMS_KEY, JSON.stringify(prunedArray));
+            } catch {}
+            return next;
+          }
+          return prev;
+        });
+      }
+    });
+  }, [userId]);
+
+  // Khi người dùng chuyển sang tab "Đã đọc", tự động nạp danh sách tin đã đọc từ backend
+  useEffect(() => {
+    if (viewTab === 'read') {
+      fetchUserReadArticles(userId, 50).then((arts) => {
+        if (arts && arts.length > 0) {
+          setReadArticlesList(arts);
+        }
+      }).catch(() => {});
+    }
+  }, [viewTab, userId]);
 
   // Initial load
   useEffect(() => {
@@ -455,14 +512,25 @@ export const App: React.FC = () => {
   // Filter articles for current view
   const unreadArticles = topArticles.filter((a) => !readIds.has(a.id));
   const starredArticles = topArticles.filter((a) => starredIds.has(a.id) || a.is_starred);
-  const readArticles = topArticles.filter((a) => readIds.has(a.id));
+
+  // Hợp nhất danh sách tin đã đọc từ backend và các tin vừa đọc trong phiên hiện tại
+  const allReadArticles = useMemo(() => {
+    const map = new Map<number, Article>();
+    readArticlesList.forEach((a) => map.set(a.id, a));
+    topArticles.forEach((a) => {
+      if (readIds.has(a.id)) {
+        map.set(a.id, a);
+      }
+    });
+    return Array.from(map.values());
+  }, [readArticlesList, topArticles, readIds]);
 
   // Filter by active tab (unread vs starred vs read)
   const baseList = viewTab === 'unread' 
     ? unreadArticles 
     : viewTab === 'starred'
     ? starredArticles
-    : readArticles;
+    : allReadArticles;
 
   // Apply region, topic filter and search
   const displayedArticles = baseList.filter((a) => {
@@ -542,6 +610,7 @@ export const App: React.FC = () => {
         stats={stats}
         onTriggerCrawl={handleTriggerCrawl}
         isTriggering={isTriggering}
+        userId={userId}
       />
 
       {/* Main Single Vertical Column Container */}
@@ -664,7 +733,7 @@ export const App: React.FC = () => {
             }}
           >
             <CheckCheck size={16} color={viewTab === 'read' ? '#10b981' : 'var(--text-muted)'} />
-            <span>✅ Đã Đọc ({readArticles.length})</span>
+            <span>✅ Đã Đọc ({readIds.size})</span>
             <span style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 500 }}>(30 ngày)</span>
           </button>
         </div>
@@ -733,7 +802,7 @@ export const App: React.FC = () => {
             </div>
 
             {/* Reset History if in Read tab */}
-            {viewTab === 'read' && readArticles.length > 0 && (
+            {viewTab === 'read' && readIds.size > 0 && (
               <button
                 onClick={clearReadHistory}
                 style={{

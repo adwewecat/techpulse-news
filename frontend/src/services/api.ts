@@ -26,14 +26,102 @@ export async function fetchNews(params: {
   return res.json();
 }
 
-export async function fetchTop6hNews(region?: string, limit: number = 10): Promise<Article[]> {
+const USER_ID_KEY = 'tech_pulse_user_id_v1';
+
+export function getOrCreateUserId(): string {
+  try {
+    let id = localStorage.getItem(USER_ID_KEY);
+    if (!id) {
+      const rnd = Math.random().toString(36).substring(2, 9);
+      const ts = Date.now().toString(36);
+      id = `usr_${ts}_${rnd}`;
+      localStorage.setItem(USER_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return 'usr_guest_cache';
+  }
+}
+
+export async function fetchTop6hNews(
+  region?: string,
+  limit: number = 30,
+  userId?: string,
+  excludeRead: boolean = true
+): Promise<Article[]> {
   const query = new URLSearchParams();
   if (region) query.set('region', region);
   query.set('limit', String(limit));
+  if (userId) {
+    query.set('user_id', userId);
+    query.set('exclude_read', String(excludeRead));
+  }
 
   const res = await fetch(`${API_BASE}/news/top-6h?${query.toString()}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+export async function markUserReadApi(userId: string, articleId: number): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/news/user/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, article_id: articleId }),
+    });
+  } catch (e) {
+    console.warn('Failed to sync mark read to backend:', e);
+  }
+}
+
+export async function markUserUnreadApi(userId: string, articleId: number): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/news/user/unread`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, article_id: articleId }),
+    });
+  } catch (e) {
+    console.warn('Failed to sync mark unread to backend:', e);
+  }
+}
+
+export async function syncUserReadsApi(userId: string, readIds: number[]): Promise<number[]> {
+  try {
+    const res = await fetch(`${API_BASE}/news/user/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, read_ids: readIds }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.read_ids || [];
+    }
+  } catch (e) {
+    console.warn('Failed to sync reads with backend:', e);
+  }
+  return readIds;
+}
+
+export async function clearUserReadsApi(userId: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/news/user/reads?user_id=${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+    });
+  } catch (e) {
+    console.warn('Failed to clear reads on backend:', e);
+  }
+}
+
+export async function fetchUserReadArticles(userId: string, limit: number = 50): Promise<Article[]> {
+  try {
+    const res = await fetch(`${API_BASE}/news/user/read-articles?user_id=${encodeURIComponent(userId)}&limit=${limit}`);
+    if (!res.ok) return [];
+    return res.json();
+  } catch (e) {
+    console.warn('Failed to fetch user read articles:', e);
+    return [];
+  }
 }
 
 export async function fetchTrendingNews(region?: string, limit: number = 10): Promise<Article[]> {

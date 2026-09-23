@@ -44,6 +44,7 @@ class JSONStorage:
         self.articles: List[Dict[str, Any]] = []
         self.clusters: List[Dict[str, Any]] = []
         self.crawl_logs: List[Dict[str, Any]] = []
+        self.user_reads: Dict[str, Dict[str, Any]] = {}
         self._url_index: Dict[str, int] = {}
         self._article_id_map: Dict[int, Dict[str, Any]] = {}
         self._cluster_id_map: Dict[int, Dict[str, Any]] = {}
@@ -64,15 +65,18 @@ class JSONStorage:
                     self.articles = data.get("articles", [])
                     self.clusters = data.get("clusters", [])
                     self.crawl_logs = data.get("crawl_logs", [])
+                    self.user_reads = data.get("user_reads", {})
                 except Exception as e:
                     print(f"[JSONStorage] Lỗi khi đọc file {self.file_path}: {e}")
                     self.articles = []
                     self.clusters = []
                     self.crawl_logs = []
+                    self.user_reads = {}
             else:
                 self.articles = []
                 self.clusters = []
                 self.crawl_logs = []
+                self.user_reads = {}
                 self._save_unlocked()
 
             self._rebuild_indices()
@@ -98,7 +102,8 @@ class JSONStorage:
         data = {
             "articles": self.articles,
             "clusters": self.clusters,
-            "crawl_logs": self.crawl_logs
+            "crawl_logs": self.crawl_logs,
+            "user_reads": self.user_reads
         }
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -204,13 +209,14 @@ class JSONStorage:
             items = filtered[offset:offset + limit]
             return items, total
 
-    def get_top_6h_articles(self, region: Optional[str] = None, limit: int = 30) -> List[Dict[str, Any]]:
+    def get_top_6h_articles(self, region: Optional[str] = None, limit: int = 30, exclude_ids: Optional[set] = None) -> List[Dict[str, Any]]:
         with self.lock:
             # Nếu người dùng chọn riêng Thế Giới (world), 100% là tin công nghệ quốc tế
             if region == "world":
                 candidates = [
                     a for a in self.articles 
                     if not a.get("is_spam", False) and a.get("is_primary", True) and a.get("region") == "world"
+                    and (not exclude_ids or a.get("id") not in exclude_ids)
                 ]
                 candidates.sort(key=lambda x: (x.get("hot_score", 0.0), parse_dt(x.get("published_at"))), reverse=True)
                 seen_clusters = set()
@@ -222,6 +228,16 @@ class JSONStorage:
                         deduped.append(art)
                     if len(deduped) >= limit:
                         break
+                # Nếu thiếu do đã đọc nhiều, lấy thêm các tin đã đọc gần nhất để luôn đủ số lượng
+                if len(deduped) < limit and exclude_ids:
+                    for art in self.articles:
+                        if not art.get("is_spam", False) and art.get("is_primary", True) and art.get("region") == "world":
+                            cid = art.get("cluster_id") or f"art_{art['id']}"
+                            if cid not in seen_clusters:
+                                seen_clusters.add(cid)
+                                deduped.append(art)
+                        if len(deduped) >= limit:
+                            break
                 return deduped
 
             # Khi xem "Tất cả" hoặc "Việt Nam": Ưu tiên đúng 50% tin Công nghệ và 50% tin Thời sự nóng
@@ -235,6 +251,8 @@ class JSONStorage:
                 if a.get("is_spam", False) or not a.get("is_primary", True):
                     continue
                 if region and a.get("region") != region:
+                    continue
+                if exclude_ids and a.get("id") in exclude_ids:
                     continue
                 
                 if is_tech_article(a):
@@ -308,9 +326,79 @@ class JSONStorage:
             # Loại bỏ tin đặc biệt khỏi mixed nếu đã lọt vào
             special_ids = {a["id"] for a in special_articles}
             mixed = [a for a in mixed if a.get("id") not in special_ids]
+            
             # Ghim đầu, đảm bảo tổng không vượt limit
             combined = special_articles + mixed
+            
+            # Nếu chưa đủ limit và có exclude_ids (người dùng đã đọc gần hết), lấy bù các tin cũ để luôn có bài nghe
+            if len(combined) < limit and exclude_ids:
+                seen_all_ids = {a["id"] for a in combined}
+                for a in self.articles:
+                    if not a.get("is_spam", False) and a.get("is_primary", True) and a.get("id") not in seen_all_ids:
+                        combined.append(a)
+                        seen_all_ids.add(a["id"])
+                    if len(combined) >= limit:
+                        break
+
             return combined[:limit]
+
+    # --- USER READ METHODS ---
+
+    def mark_user_read(self, user_id: str, article_id: int):
+        with self.lock:
+            if not user_id:
+                return
+            if user_id not in self.user_reads:
+                self.user_reads[user_id] = {"read_ids": [], "updated_at": datetime.utcnow().isoformat()}
+            user_data = self.user_reads[user_id]
+            if article_id not in user_data["read_ids"]:
+                user_data["read_ids"].append(article_id)
+                user_data["updated_at"] = datetime.utcnow().isoformat()
+                self._save_unlocked()
+
+    def mark_user_unread(self, user_id: str, article_id: int):
+        with self.lock:
+            if not user_id or user_id not in self.user_reads:
+                return
+            user_data = self.user_reads[user_id]
+            if article_id in user_data["read_ids"]:
+                user_data["read_ids"].remove(article_id)
+                user_data["updated_at"] = datetime.utcnow().isoformat()
+                self._save_unlocked()
+
+    def sync_user_reads(self, user_id: str, client_read_ids: List[int]) -> List[int]:
+        with self.lock:
+            if not user_id:
+                return client_read_ids
+            if user_id not in self.user_reads:
+                self.user_reads[user_id] = {"read_ids": [], "updated_at": datetime.utcnow().isoformat()}
+            server_ids = set(self.user_reads[user_id].get("read_ids", []))
+            merged = server_ids.union(set(client_read_ids))
+            self.user_reads[user_id]["read_ids"] = list(merged)
+            self.user_reads[user_id]["updated_at"] = datetime.utcnow().isoformat()
+            self._save_unlocked()
+            return list(merged)
+
+    def get_user_read_ids(self, user_id: str) -> List[int]:
+        with self.lock:
+            if not user_id or user_id not in self.user_reads:
+                return []
+            return list(self.user_reads[user_id].get("read_ids", []))
+
+    def clear_user_reads(self, user_id: str):
+        with self.lock:
+            if user_id in self.user_reads:
+                self.user_reads[user_id] = {"read_ids": [], "updated_at": datetime.utcnow().isoformat()}
+                self._save_unlocked()
+
+    def get_user_read_articles(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        with self.lock:
+            if not user_id or user_id not in self.user_reads:
+                return []
+            read_ids = set(self.user_reads[user_id].get("read_ids", []))
+            articles = [a for a in self.articles if a.get("id") in read_ids]
+            articles.sort(key=lambda x: parse_dt(x.get("published_at")), reverse=True)
+            return articles[:limit]
 
 
     def get_trending_articles(self, region: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:

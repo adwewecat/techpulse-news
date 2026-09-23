@@ -9,6 +9,7 @@ interface HeaderProps {
   stats: StatsOverview | null;
   onTriggerCrawl: () => void;
   isTriggering: boolean;
+  userId?: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -18,6 +19,7 @@ export const Header: React.FC<HeaderProps> = ({
   stats,
   onTriggerCrawl,
   isTriggering,
+  userId,
 }) => {
   const formatLastRun = () => {
     if (!crawlStatus?.last_run) return 'Vừa quét gần đây';
@@ -127,7 +129,26 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Live Status & Action Button */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {/* Guest Cache ID */}
+          {userId && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.35rem',
+              padding: '0.4rem 0.65rem',
+              borderRadius: '8px',
+              background: 'rgba(99, 102, 241, 0.1)',
+              border: '1px solid rgba(99, 102, 241, 0.25)',
+              fontSize: '0.72rem',
+              color: '#a5b4fc',
+            }} title={`ID thiết bị: ${userId} (Tự động lưu lịch sử đọc không cần đăng nhập)`}>
+              <span>👤</span>
+              <span style={{ fontWeight: 600 }}>Khách</span>
+              <span style={{ opacity: 0.6, fontSize: '0.68rem' }}>({userId.replace('usr_', '').substring(0, 7)})</span>
+            </div>
+          )}
+
           {/* Crawl Status Info */}
           <div style={{
             display: 'flex',

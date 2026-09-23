@@ -86,7 +86,7 @@ def extract_image_url(entry: Any, fallback_img: Optional[str] = None) -> Optiona
 async def fetch_article_body_text(url: str, client: httpx.AsyncClient) -> str:
     """Cào nhanh các đoạn văn hoàn chỉnh bài báo nếu RSS chỉ có tóm tắt ngắn hoặc bị cắt cụt (...)"""
     try:
-        res = await client.get(url, headers=HEADERS, timeout=7.0)
+        res = await client.get(url, headers=HEADERS, timeout=4.0)
         if res.status_code == 200:
             soup = BeautifulSoup(res.content, "html.parser")
             for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "figure", "figcaption"]):
@@ -132,7 +132,7 @@ async def fetch_feed(client: httpx.AsyncClient, source: Dict[str, Any]) -> List[
         feed = feedparser.parse(response.content)
         parsed_items = []
 
-        for entry in feed.entries[:25]:  # Lấy tối đa 25 tin mới nhất mỗi nguồn
+        for entry in feed.entries[:15]:  # Lấy tối đa 15 tin mới nhất mỗi nguồn
             title = getattr(entry, "title", "").strip()
             link = getattr(entry, "link", "").strip()
             if not title or not link:
@@ -212,8 +212,8 @@ async def run_crawl_cycle(storage_instance: Optional[JSONStorage] = None) -> Opt
                 title = item["title"]
                 summary_raw = item["summary"]
 
-                # Nếu tóm tắt RSS quá ngắn (< 250 ký tự) hoặc bị cắt cụt với dấu "...", cào thêm bài báo gốc
-                if len(summary_raw) < 250 or summary_raw.rstrip().endswith(("...", "…", "..", "---")):
+                # Nếu tóm tắt RSS quá ngắn (< 120 ký tự) hoặc bị cắt cụt với dấu "...", cào thêm bài báo gốc
+                if len(summary_raw) < 120 or summary_raw.rstrip().endswith(("...", "…", "..", "---")):
                     body_extra = await fetch_article_body_text(item["url"], client)
                     if body_extra and len(body_extra) > len(summary_raw):
                         summary_raw = body_extra

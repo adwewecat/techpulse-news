@@ -54,18 +54,77 @@ def get_news_list(
         has_more=(offset + limit) < total
     )
 
+from pydantic import BaseModel
+
+class UserSyncRequest(BaseModel):
+    user_id: str
+    read_ids: List[int]
+
+class UserReadRequest(BaseModel):
+    user_id: str
+    article_id: int
+
 @router.get("/top-6h", response_model=List[ArticleOut])
 def get_top_6h_news(
     region: Optional[str] = Query(None, description="Khu vực: vietnam | world"),
     limit: int = Query(30, ge=1, le=100),
+    user_id: Optional[str] = Query(None, description="Mã người dùng ẩn danh để loại trừ tin đã đọc"),
+    exclude_read: bool = Query(True, description="Chỉ lấy tin người dùng chưa đọc"),
     storage: JSONStorage = Depends(get_storage)
 ):
     """
     Mục đặc biệt: 🔥 30 tin nổi bật nhất 6 giờ qua (lọc trùng lặp)
-    Nếu lượng tin trong 6 giờ chưa đủ 30 tin, tự động mở rộng khung giờ 12h-24h để luôn có đủ top tin nóng nhất.
+    Nếu truyền user_id và exclude_read=True: Tự động loại trừ các tin mà thiết bị/người dùng này đã đọc,
+    đảm bảo khi load lại trang luôn có 30 tin MỚI CHƯA ĐỌC, không bị lặp lại tin cũ.
     """
-    results = storage.get_top_6h_articles(region=region, limit=limit)
+    exclude_ids = None
+    if user_id and exclude_read:
+        read_list = storage.get_user_read_ids(user_id)
+        if read_list:
+            exclude_ids = set(read_list)
+
+    results = storage.get_top_6h_articles(region=region, limit=limit, exclude_ids=exclude_ids)
     return [enrich_article_out(storage, art) for art in results]
+
+@router.post("/user/read")
+def mark_user_read_endpoint(req: UserReadRequest, storage: JSONStorage = Depends(get_storage)):
+    """Đánh dấu một bài viết là đã đọc cho thiết bị/người dùng ẩn danh"""
+    storage.mark_user_read(req.user_id, req.article_id)
+    return {"status": "ok", "user_id": req.user_id, "article_id": req.article_id}
+
+@router.post("/user/unread")
+def mark_user_unread_endpoint(req: UserReadRequest, storage: JSONStorage = Depends(get_storage)):
+    """Hoàn tác trạng thái đã đọc của một bài viết"""
+    storage.mark_user_unread(req.user_id, req.article_id)
+    return {"status": "ok", "user_id": req.user_id, "article_id": req.article_id}
+
+@router.post("/user/sync")
+def sync_user_reads_endpoint(req: UserSyncRequest, storage: JSONStorage = Depends(get_storage)):
+    """Đồng bộ danh sách tin đã đọc giữa client và server (merge 2 chiều)"""
+    merged_ids = storage.sync_user_reads(req.user_id, req.read_ids)
+    return {"status": "ok", "user_id": req.user_id, "read_ids": merged_ids, "total": len(merged_ids)}
+
+@router.get("/user/reads")
+def get_user_reads_endpoint(user_id: str = Query(...), storage: JSONStorage = Depends(get_storage)):
+    """Lấy toàn bộ danh sách ID bài viết đã đọc của người dùng/thiết bị"""
+    read_ids = storage.get_user_read_ids(user_id)
+    return {"user_id": user_id, "read_ids": read_ids, "total": len(read_ids)}
+
+@router.get("/user/read-articles", response_model=List[ArticleOut])
+def get_user_read_articles_endpoint(
+    user_id: str = Query(...),
+    limit: int = Query(50, ge=1, le=100),
+    storage: JSONStorage = Depends(get_storage)
+):
+    """Lấy danh sách các bài viết người dùng đã đọc"""
+    articles = storage.get_user_read_articles(user_id, limit=limit)
+    return [enrich_article_out(storage, art) for art in articles]
+
+@router.delete("/user/reads")
+def clear_user_reads_endpoint(user_id: str = Query(...), storage: JSONStorage = Depends(get_storage)):
+    """Đặt lại toàn bộ lịch sử đọc của người dùng/thiết bị"""
+    storage.clear_user_reads(user_id)
+    return {"status": "ok", "user_id": user_id, "message": "Đã làm mới danh sách tin đã đọc"}
 
 @router.get("/trending", response_model=List[ArticleOut])
 def get_trending_news(

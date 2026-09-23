@@ -27,9 +27,26 @@ async def lifespan(app: FastAPI):
     # Bật tiến trình quét tự động 30 phút
     start_scheduler()
 
-    # Kiểm tra nếu Storage chưa có bài nào, chạy quét khởi động ban đầu
-    if count == 0:
-        logger.info("Chưa có tin tức nào trong Storage. Kích hoạt lượt cào tin ban đầu...")
+    # Tự động quét tin tức mới khi khởi động nếu dữ liệu đã quá 20 phút hoặc chưa có tin
+    last_log = storage.get_latest_crawl_log()
+    need_crawl = False
+    if count == 0 or not last_log or not last_log.get("finished_at"):
+        need_crawl = True
+    else:
+        try:
+            from datetime import datetime, timezone
+            last_finished = last_log["finished_at"].replace("Z", "+00:00")
+            last_time = datetime.fromisoformat(last_finished)
+            if last_time.tzinfo is None:
+                last_time = last_time.replace(tzinfo=timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            if (now_utc - last_time).total_seconds() > 20 * 60:
+                need_crawl = True
+        except Exception:
+            need_crawl = True
+
+    if need_crawl:
+        logger.info("Dữ liệu tin tức đã quá 20 phút. Tự động kích hoạt cào tin ngầm trên nền...")
         asyncio.create_task(run_crawl_cycle())
 
     yield
