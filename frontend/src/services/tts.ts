@@ -1,11 +1,31 @@
 import { API_BASE } from './api';
+import type { Article } from '../types/news';
+
+export interface TTSPlaylistCallbacks {
+  onArticleStart?: (article: Article, rank: number) => void;
+  onArticleEnd?: (article: Article, rank: number) => void;
+  onPlaylistFinished?: () => void;
+  onError?: (err: any, article: Article) => void;
+}
 
 export class VietnameseTTS {
   private static audio: HTMLAudioElement | null = null;
   private static isPausedState: boolean = false;
   private static currentRate: number = 1.25; // Mặc định 1.25x nhanh, rõ, mạch lạc
-
   private static currentVoice: string = 'vi-VN-HoaiMyNeural';
+
+  // Playlist độc lập không phụ thuộc React state re-render khi tắt màn hình điện thoại
+  private static playlist: Article[] = [];
+  private static currentIndex: number = -1;
+  private static isContinuousAutoplay: boolean = true;
+  private static callbacks: TTSPlaylistCallbacks = {};
+
+  // Bộ nhớ đệm Blob URL (0ms latency khi chuyển bài trên iOS / Android lock screen)
+  private static blobCache: Map<string, string> = new Map();
+  private static pendingFetches: Map<string, Promise<string>> = new Map();
+
+  // WakeLock để ngăn CPU điện thoại ngủ đông sâu khi phát audio
+  private static wakeLock: any = null;
 
   public static setVoice(voice: string) {
     this.currentVoice = voice;
@@ -52,125 +72,124 @@ export class VietnameseTTS {
     return this.currentRate;
   }
 
-  private static preloadedKeys: Set<string> = new Set();
+  public static setAutoplay(enabled: boolean) {
+    this.isContinuousAutoplay = enabled;
+  }
+
+  public static getAutoplay(): boolean {
+    return this.isContinuousAutoplay;
+  }
 
   /**
-   * Tải trước ngầm (Preload/Prefetch) âm thanh của bài viết tiếp theo:
-   * - Kích hoạt Backend Render sinh trước file MP3 và lưu vào RAM/Disk Cache
-   * - Chỉ dùng 1 request fetch duy nhất, không tạo thẻ Audio trùng lặp gây nghẽn kết nối
+   * Tạo khóa cache duy nhất cho từng bài và giọng đọc
    */
-  public static preloadArticleAudio(articleId: number, rank: number, voice?: string) {
-    if (!articleId) return;
+  private static getCacheKey(articleId: number, rank: number, voice: string): string {
+    return `art_${articleId}_r_${rank}_${voice}`;
+  }
+
+  /**
+   * Tải trước ngầm dữ liệu âm thanh dạng Blob vào bộ nhớ RAM trình duyệt:
+   * - Trả về `blob:http://...` URL sẵn sàng phát ngay lập tức (0ms độ trễ)
+   * - Ngăn hoàn toàn tình trạng iOS Safari / Android Chrome tắt web vì âm thanh bị ngắt quãng quá 1.5s
+   */
+  public static async preloadArticleAudio(articleId: number, rank: number, voice?: string): Promise<string> {
+    if (!articleId) return '';
     const selectedVoice = voice || this.getVoice();
-    const key = `${articleId}_${rank}_${selectedVoice}`;
-    if (this.preloadedKeys.has(key)) return;
-    this.preloadedKeys.add(key);
+    const key = this.getCacheKey(articleId, rank, selectedVoice);
+
+    if (this.blobCache.has(key)) {
+      return this.blobCache.get(key)!;
+    }
+
+    if (this.pendingFetches.has(key)) {
+      return this.pendingFetches.get(key)!;
+    }
 
     const audioUrl = `${API_BASE}/tts/article/${articleId}?rank=${rank}&voice=${encodeURIComponent(selectedVoice)}`;
 
-    // Tải ngầm bằng fetch để backend sinh xong và lưu vào RAM/Disk cache
-    fetch(audioUrl)
-      .then((res) => {
-        if (!res.ok) {
-          // Nếu có lỗi, cho phép preload lại lần sau
-          this.preloadedKeys.delete(key);
-        }
-      })
-      .catch(() => {
-        this.preloadedKeys.delete(key);
-      });
-  }
-
-  /**
-   * Khởi tạo các sự kiện MediaSession (điều khiển trên màn hình khóa điện thoại Android / iOS / Dynamic Island)
-   */
-  public static initMediaSession(handlers: {
-    onPlay?: () => void;
-    onPause?: () => void;
-    onNext?: () => void;
-    onStop?: () => void;
-  }) {
-    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+    const fetchPromise = (async () => {
       try {
-        if (handlers.onPlay) navigator.mediaSession.setActionHandler('play', handlers.onPlay);
-        if (handlers.onPause) navigator.mediaSession.setActionHandler('pause', handlers.onPause);
-        if (handlers.onNext) navigator.mediaSession.setActionHandler('nexttrack', handlers.onNext);
-        if (handlers.onStop) navigator.mediaSession.setActionHandler('stop', handlers.onStop);
-      } catch (e) {
-        console.warn('Lỗi cấu hình mediaSession handlers:', e);
+        const response = await fetch(audioUrl);
+        if (!response.ok) {
+          throw new Error(`TTS preload failed HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        this.blobCache.set(key, blobUrl);
+
+        // Giới hạn RAM cache tối đa 10 blob url gần nhất để tránh tốn bộ nhớ
+        if (this.blobCache.size > 12) {
+          const firstKey = this.blobCache.keys().next().value;
+          if (firstKey && firstKey !== key) {
+            const oldUrl = this.blobCache.get(firstKey);
+            if (oldUrl) {
+              try { URL.revokeObjectURL(oldUrl); } catch {}
+            }
+            this.blobCache.delete(firstKey);
+          }
+        }
+
+        return blobUrl;
+      } catch (err) {
+        console.warn(`Lỗi preload audio bài #${rank} (ID: ${articleId}):`, err);
+        return audioUrl; // Fallback về direct URL nếu fetch blob gặp lỗi
+      } finally {
+        this.pendingFetches.delete(key);
       }
-    }
+    })();
+
+    this.pendingFetches.set(key, fetchPromise);
+    return fetchPromise;
   }
 
   /**
-   * Phát âm thanh Tiếng Việt chuẩn 100% từ API backend:
-   * - Tái sử dụng một instance Audio duy nhất đã được User Click cấp quyền
-   * - Hỗ trợ phát ngầm khi tắt màn hình điện thoại (Mobile Background Playback & MediaSession)
-   * - Giọng đọc Tiếng Việt tự nhiên Neural siêu mượt (Hoài My Nữ, Nam Minh Nam, Google)
-   * - Tự động dịch tiêu đề/nội dung sang Tiếng Việt nếu là tin quốc tế
-   * - Hỗ trợ chọn tốc độ đọc (1.0x, 1.25x, 1.5x, 1.75x, 2.0x)
+   * Khởi tạo hoặc tái sử dụng instance Audio duy nhất được User Click cấp quyền
    */
-  public static playArticleAudio(
-    articleId: number,
-    rank: number,
-    voice?: string,
-    articleTitle?: string,
-    onStart?: () => void,
-    onEnd?: () => void,
-    onError?: (err: any) => void
-  ) {
-    // Tái sử dụng đối tượng Audio duy nhất đã được User Click cấp quyền
+  private static getOrCreateAudio(): HTMLAudioElement {
     if (!this.audio) {
       this.audio = new Audio();
       this.audio.preload = 'auto';
-      // Thuộc tính quan trọng cho iOS/Android chạy âm thanh inline và không bị ngắt khi tắt màn hình
       this.audio.setAttribute('playsinline', 'true');
       this.audio.setAttribute('webkit-playsinline', 'true');
-    } else {
+    }
+    return this.audio;
+  }
+
+  /**
+   * Yêu cầu Screen WakeLock để điện thoại không rơi vào trạng thái ngủ đông khi đang phát
+   */
+  private static async requestWakeLock() {
+    if (typeof navigator !== 'undefined' && 'wakeLock' in navigator) {
       try {
-        this.audio.pause();
+        if (!this.wakeLock) {
+          this.wakeLock = await (navigator as any).wakeLock.request('screen');
+          this.wakeLock.addEventListener('release', () => {
+            this.wakeLock = null;
+          });
+        }
       } catch {
         // ignore
       }
     }
+  }
 
-    const audio = this.audio;
-
-    // 1. Dọn dẹp toàn bộ listeners cũ trước khi gán bài mới để tránh kích hoạt chéo
-    audio.onloadedmetadata = null;
-    audio.oncanplay = null;
-    audio.onplay = null;
-    audio.onpause = null;
-    audio.onended = null;
-    audio.onerror = null;
-
-    const selectedVoice = voice || this.getVoice();
-    const audioUrl = `${API_BASE}/tts/article/${articleId}?rank=${rank}&voice=${encodeURIComponent(selectedVoice)}`;
-
-    // 2. QUAN TRỌNG: Reset thời gian currentTime = 0 trước khi nạp nguồn mới
-    // Tránh việc trình duyệt mang thời lượng bài cũ sang bài mới làm kẹt (stalled) hoặc đơ
-    try {
-      audio.currentTime = 0;
-    } catch {
-      // ignore
+  private static releaseWakeLock() {
+    if (this.wakeLock) {
+      try {
+        this.wakeLock.release();
+      } catch {}
+      this.wakeLock = null;
     }
+  }
 
-    audio.src = audioUrl;
-    audio.preload = 'auto';
-    this.isPausedState = false;
-
-    // 3. Tải nguồn mới chuẩn HTML5
-    try {
-      audio.load();
-    } catch {
-      // ignore
-    }
-
-    // Cập nhật thông tin lên Màn hình khóa điện thoại (Lock Screen Widget trên iOS / Android)
+  /**
+   * Cập nhật thông tin lên Màn hình khóa điện thoại (MediaSession Widget)
+   */
+  private static updateMediaSession(article: Article, rank: number) {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       try {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: articleTitle ? `[#${rank}] ${articleTitle}` : `Tin số #${rank}`,
+          title: `[#${rank}] ${article.title}`,
           artist: 'TECH PULSE - AI News Radio',
           album: 'Bản tin AI & Công nghệ nổi bật',
           artwork: [
@@ -183,13 +202,85 @@ export class VietnameseTTS {
         // ignore
       }
     }
+  }
+
+  /**
+   * Bắt đầu phát danh sách bài viết (Playlist) liên tục chuẩn Mobile Background:
+   * - Tự động chuyển bài tức thì ngay trong sự kiện onended
+   * - Tải trước Blob của 2 bài tiếp theo vào RAM
+   * - Hoạt động bền bỉ khi tắt màn hình hoặc chuyển ứng dụng khác
+   */
+  public static startPlaylist(
+    articles: Article[],
+    startIndex: number = 0,
+    callbacks?: TTSPlaylistCallbacks,
+    voice?: string
+  ) {
+    if (!articles || articles.length === 0) return;
+
+    this.playlist = [...articles];
+    this.currentIndex = Math.max(0, Math.min(startIndex, articles.length - 1));
+    this.callbacks = callbacks || {};
+    if (voice) {
+      this.setVoice(voice);
+    }
+
+    this.requestWakeLock();
+    this.playCurrentTrack();
+  }
+
+  /**
+   * Phát bài hiện tại trong danh sách
+   */
+  private static async playCurrentTrack() {
+    if (this.currentIndex < 0 || this.currentIndex >= this.playlist.length) {
+      this.stop();
+      if (this.callbacks.onPlaylistFinished) {
+        this.callbacks.onPlaylistFinished();
+      }
+      return;
+    }
+
+    const currentArticle = this.playlist[this.currentIndex];
+    const rank = this.currentIndex + 1;
+    const selectedVoice = this.getVoice();
+    const audio = this.getOrCreateAudio();
+
+    // Dọn dẹp listeners cũ
+    audio.onloadedmetadata = null;
+    audio.oncanplay = null;
+    audio.onplay = null;
+    audio.onpause = null;
+    audio.onended = null;
+    audio.onerror = null;
+
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+    } catch {}
+
+    // 1. Kiểm tra xem bài hiện tại đã có Blob URL trong cache chưa
+    const key = this.getCacheKey(currentArticle.id, rank, selectedVoice);
+    let playableSrc = this.blobCache.get(key);
+
+    if (!playableSrc) {
+      playableSrc = `${API_BASE}/tts/article/${currentArticle.id}?rank=${rank}&voice=${encodeURIComponent(selectedVoice)}`;
+    }
+
+    audio.src = playableSrc;
+    audio.preload = 'auto';
+    this.isPausedState = false;
+
+    try {
+      audio.load();
+    } catch {}
+
+    this.updateMediaSession(currentArticle, rank);
 
     const applyRate = () => {
       try {
         audio.playbackRate = this.getPlaybackRate();
-      } catch {
-        // ignore
-      }
+      } catch {}
     };
 
     audio.onloadedmetadata = applyRate;
@@ -200,7 +291,13 @@ export class VietnameseTTS {
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
-      if (onStart) onStart();
+      if (this.callbacks.onArticleStart) {
+        this.callbacks.onArticleStart(currentArticle, rank);
+      }
+
+      // 2. KHI BÀI HIỆN TẠI BẮT ĐẦU PHÁT: Tải trước Blob của 2 bài kế tiếp ngay lập tức!
+      // Việc này đảm bảo khi bài hiện tại kết thúc, bài tiếp theo ĐÃ CÓ SẴN TRONG RAM!
+      this.preloadUpcomingTracks();
     };
 
     audio.onpause = () => {
@@ -209,39 +306,122 @@ export class VietnameseTTS {
       }
     };
 
+    // 3. SỰ KIỆN QUAN TRỌNG NHẤT: ONENDED
+    // Chuyển bài ĐỒNG BỘ trong cùng luồng sự kiện để iOS Safari / Android Chrome không tắt web
     audio.onended = () => {
       this.isPausedState = false;
-      if (onEnd) onEnd();
+      const finishedArticle = this.playlist[this.currentIndex];
+      const finishedRank = this.currentIndex + 1;
+
+      // Báo cho UI React biết bài này đã kết thúc
+      if (this.callbacks.onArticleEnd) {
+        try {
+          this.callbacks.onArticleEnd(finishedArticle, finishedRank);
+        } catch (e) {
+          console.error('Lỗi onArticleEnd callback:', e);
+        }
+      }
+
+      if (this.isContinuousAutoplay && this.currentIndex + 1 < this.playlist.length) {
+        this.currentIndex++;
+        // Phát bài kế tiếp NGAY LẬP TỨC (0ms)
+        this.playCurrentTrack();
+      } else {
+        this.stop();
+        if (this.callbacks.onPlaylistFinished) {
+          this.callbacks.onPlaylistFinished();
+        }
+      }
     };
 
     audio.onerror = (e) => {
-      // Nếu là MEDIA_ERR_ABORTED (mã 1), do chuyển bài hoặc đổi giọng chủ động, bỏ qua
       if (audio.error && audio.error.code === 1) {
+        // MEDIA_ERR_ABORTED do user đổi bài, bỏ qua
         return;
       }
-      console.error('Lỗi khi phát âm thanh tiếng Việt:', e, audio.error);
+      console.error('Lỗi khi phát audio bài viết:', e, audio.error);
       this.isPausedState = false;
-      if (onError) onError(e);
+
+      if (this.callbacks.onError) {
+        this.callbacks.onError(e, currentArticle);
+      }
+
+      // Tự động bỏ qua bài lỗi và phát bài tiếp theo sau 200ms để không bị kẹt
+      if (this.isContinuousAutoplay && this.currentIndex + 1 < this.playlist.length) {
+        this.currentIndex++;
+        setTimeout(() => {
+          this.playCurrentTrack();
+        }, 200);
+      }
     };
 
     const playPromise = audio.play();
     if (playPromise !== undefined) {
       playPromise.catch((err) => {
         if (err && (err.name === 'AbortError' || err.code === 20)) {
-          // Bỏ qua lỗi ngắt do người dùng bấm đổi bài hoặc dừng đọc
           return;
         }
-        if (err && err.name === 'NotAllowedError') {
-          console.warn('Trình duyệt chặn autoplay âm thanh chưa tương tác:', err);
-          if (onError) onError(new Error('Vui lòng bấm nút Nghe đọc để cấp quyền âm thanh cho trình duyệt'));
-          return;
+        console.warn('Lỗi audio.play():', err);
+        if (this.callbacks.onError) {
+          this.callbacks.onError(err, currentArticle);
         }
-        console.warn('Lỗi khi phát âm thanh:', err);
-        if (onError) onError(err);
       });
     }
   }
 
+  /**
+   * Tải trước Blob ngầm cho bài N+1 và N+2
+   */
+  private static preloadUpcomingTracks() {
+    const selectedVoice = this.getVoice();
+    // Tải bài kế tiếp N+1
+    if (this.currentIndex + 1 < this.playlist.length) {
+      const nextArt = this.playlist[this.currentIndex + 1];
+      this.preloadArticleAudio(nextArt.id, this.currentIndex + 2, selectedVoice);
+    }
+    // Tải trước thêm bài N+2 để chuẩn bị sẵn
+    if (this.currentIndex + 2 < this.playlist.length) {
+      const nextArt2 = this.playlist[this.currentIndex + 2];
+      this.preloadArticleAudio(nextArt2.id, this.currentIndex + 3, selectedVoice);
+    }
+  }
+
+  /**
+   * Chuyển sang bài tiếp theo (Next track) - Hỗ trợ cả nút bấm tai nghe Bluetooth & Lock Screen
+   */
+  public static playNext() {
+    if (this.currentIndex + 1 < this.playlist.length) {
+      const finishedArt = this.playlist[this.currentIndex];
+      if (this.callbacks.onArticleEnd && finishedArt) {
+        this.callbacks.onArticleEnd(finishedArt, this.currentIndex + 1);
+      }
+      this.currentIndex++;
+      this.playCurrentTrack();
+    } else {
+      this.stop();
+      if (this.callbacks.onPlaylistFinished) {
+        this.callbacks.onPlaylistFinished();
+      }
+    }
+  }
+
+  /**
+   * Quay lại bài trước đó (Previous track)
+   */
+  public static playPrevious() {
+    if (this.currentIndex > 0) {
+      this.currentIndex--;
+      this.playCurrentTrack();
+    } else {
+      if (this.audio) {
+        this.audio.currentTime = 0;
+      }
+    }
+  }
+
+  /**
+   * Tạm dừng
+   */
   public static pause() {
     if (this.audio && !this.audio.paused) {
       this.audio.pause();
@@ -252,6 +432,9 @@ export class VietnameseTTS {
     }
   }
 
+  /**
+   * Tiếp tục phát
+   */
   public static resume() {
     if (this.audio && this.audio.paused) {
       const playPromise = this.audio.play();
@@ -265,20 +448,23 @@ export class VietnameseTTS {
     }
   }
 
+  /**
+   * Dừng hẳn
+   */
   public static stop() {
+    this.releaseWakeLock();
     if (this.audio) {
       try {
         this.audio.pause();
         this.audio.currentTime = 0;
         this.audio.src = '';
-      } catch {
-        // ignore
-      }
+      } catch {}
       this.isPausedState = false;
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'none';
       }
     }
+    this.currentIndex = -1;
   }
 
   public static isSpeaking(): boolean {
@@ -287,5 +473,68 @@ export class VietnameseTTS {
 
   public static isPaused(): boolean {
     return this.isPausedState;
+  }
+
+  public static getCurrentArticle(): Article | null {
+    if (this.currentIndex >= 0 && this.currentIndex < this.playlist.length) {
+      return this.playlist[this.currentIndex];
+    }
+    return null;
+  }
+
+  public static getCurrentIndex(): number {
+    return this.currentIndex;
+  }
+
+  /**
+   * Đăng ký sự kiện MediaSession toàn cục (Lock Screen Widget & Phím tai nghe)
+   */
+  public static initMediaSession(extraHandlers?: {
+    onPlay?: () => void;
+    onPause?: () => void;
+    onNext?: () => void;
+    onPrevious?: () => void;
+    onStop?: () => void;
+  }) {
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.setActionHandler('play', () => {
+          this.resume();
+          if (extraHandlers?.onPlay) extraHandlers.onPlay();
+        });
+        navigator.mediaSession.setActionHandler('pause', () => {
+          this.pause();
+          if (extraHandlers?.onPause) extraHandlers.onPause();
+        });
+        navigator.mediaSession.setActionHandler('nexttrack', () => {
+          this.playNext();
+          if (extraHandlers?.onNext) extraHandlers.onNext();
+        });
+        navigator.mediaSession.setActionHandler('previoustrack', () => {
+          this.playPrevious();
+          if (extraHandlers?.onPrevious) extraHandlers.onPrevious();
+        });
+        navigator.mediaSession.setActionHandler('stop', () => {
+          this.stop();
+          if (extraHandlers?.onStop) extraHandlers.onStop();
+        });
+      } catch (e) {
+        console.warn('Lỗi cấu hình mediaSession handlers:', e);
+      }
+    }
+  }
+
+  /**
+   * Phát audio bản xem trước phát âm hoặc phân tích chuyên sâu
+   */
+  public static playAudioBlob(blob: Blob): HTMLAudioElement {
+    const blobUrl = URL.createObjectURL(blob);
+    const audio = new Audio(blobUrl);
+    audio.playbackRate = this.getPlaybackRate();
+    audio.play().catch(() => {});
+    audio.onended = () => {
+      try { URL.revokeObjectURL(blobUrl); } catch {}
+    };
+    return audio;
   }
 }

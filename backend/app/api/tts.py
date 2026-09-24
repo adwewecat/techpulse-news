@@ -258,6 +258,78 @@ async def get_available_voices():
     """Lấy danh sách các giọng đọc Tiếng Việt có sẵn"""
     return VOICE_OPTIONS
 
+from pydantic import BaseModel
+
+class WordPronunciationItem(BaseModel):
+    original: str
+    replacement: str
+
+class WordRemoveItem(BaseModel):
+    original: str
+
+class PreviewPronunciationRequest(BaseModel):
+    text: str
+    voice: Optional[str] = DEFAULT_VOICE
+
+def clear_all_audio_cache():
+    """Xóa sạch bộ nhớ đệm RAM và toàn bộ file mp3 trong Disk Cache để phát âm mới có hiệu lực ngay"""
+    AUDIO_CACHE.clear()
+    try:
+        for f in AUDIO_CACHE_DIR.glob("*.mp3"):
+            f.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Lỗi xóa disk cache âm thanh: {e}")
+
+@router.get("/dictionary")
+def get_pronunciation_dictionary():
+    from app.services.pronunciation import get_pronunciation_dict
+    d = get_pronunciation_dict()
+    items = [{"original": k, "replacement": v} for k, v in d.items()]
+    return {"dictionary": items, "total": len(items)}
+
+@router.post("/dictionary/word")
+def add_or_update_pronunciation_word(item: WordPronunciationItem):
+    from app.services.pronunciation import add_or_update_word
+    d = add_or_update_word(item.original, item.replacement)
+    clear_all_audio_cache()
+    items = [{"original": k, "replacement": v} for k, v in d.items()]
+    return {"status": "ok", "dictionary": items, "total": len(items)}
+
+@router.post("/dictionary/word/delete")
+def remove_pronunciation_word(item: WordRemoveItem):
+    from app.services.pronunciation import remove_word
+    d = remove_word(item.original)
+    clear_all_audio_cache()
+    items = [{"original": k, "replacement": v} for k, v in d.items()]
+    return {"status": "ok", "dictionary": items, "total": len(items)}
+
+@router.post("/dictionary/reset")
+def reset_pronunciation_dictionary():
+    from app.services.pronunciation import reset_to_default
+    d = reset_to_default()
+    clear_all_audio_cache()
+    items = [{"original": k, "replacement": v} for k, v in d.items()]
+    return {"status": "ok", "dictionary": items, "total": len(items)}
+
+@router.post("/dictionary/preview")
+async def preview_pronunciation(req: PreviewPronunciationRequest):
+    from app.services.pronunciation import apply_pronunciation
+    pronounced_text = apply_pronunciation(req.text)
+    selected_voice = req.voice if req.voice in {v["id"] for v in VOICE_OPTIONS} else DEFAULT_VOICE
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        audio_bytes = await synthesize_speech(pronounced_text, selected_voice, client)
+        if not audio_bytes or len(audio_bytes) < 300:
+            raise HTTPException(status_code=500, detail="Không thể tạo âm thanh xem trước")
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Type": "audio/mpeg",
+                "Content-Length": str(len(audio_bytes)),
+                "Cache-Control": "no-cache"
+            }
+        )
+
 @router.get("/article/{article_id}")
 async def get_article_speech(
     article_id: int,
@@ -405,6 +477,10 @@ async def get_article_speech(
             if needs_vi_translation(full_script):
                 full_script = await translate_to_vietnamese(full_script, client)
 
+            # Áp dụng từ điển cấu hình phát âm theo người dùng (VD: OpenAI -> ô pần ây ai)
+            from app.services.pronunciation import apply_pronunciation
+            full_script = apply_pronunciation(full_script)
+
             final_bytes = await synthesize_speech(full_script, selected_voice, client)
 
             if not final_bytes or len(final_bytes) < 300:
@@ -529,6 +605,8 @@ async def get_deep_analysis_speech(
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
         full_script_vi = await translate_to_vietnamese(full_script, client)
+        from app.services.pronunciation import apply_pronunciation
+        full_script_vi = apply_pronunciation(full_script_vi)
 
         final_bytes = await synthesize_speech(full_script_vi, selected_voice, client)
 

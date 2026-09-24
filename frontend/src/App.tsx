@@ -12,6 +12,7 @@ import { AudioPlayerBar, VOICE_OPTIONS } from './components/AudioPlayerBar';
 import { VerticalNewsCard } from './components/VerticalNewsCard';
 import { QuickReaderModal } from './components/QuickReaderModal';
 import { DeepAnalysisModal } from './components/DeepAnalysisModal';
+import { PronunciationModal } from './components/PronunciationModal';
 import { 
   Flame, CheckCheck, Sparkles, Star,
   RotateCcw, AlertCircle, CheckCircle2, Cpu
@@ -24,6 +25,9 @@ const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000; // 48 giờ
 export const App: React.FC = () => {
   // Anonymous guest user ID (no login required, auto-cached)
   const [userId] = useState<string>(() => getOrCreateUserId());
+
+  // Pronunciation modal open state
+  const [isPronunciationOpen, setIsPronunciationOpen] = useState<boolean>(false);
 
   // State for raw 30 top articles from backend
   const [topArticles, setTopArticles] = useState<Article[]>([]);
@@ -337,99 +341,52 @@ export const App: React.FC = () => {
     }
   };
 
-  // Play audio for a specific article
-  const handlePlayArticle = useCallback((article: Article) => {
-    // Record click count
-    recordArticleClick(article.id);
+  // Callbacks cho engine VietnameseTTS tự hành:
+  // Chạy độc lập, không bị ảnh hưởng bởi việc tắt màn hình điện thoại hay React microtask throttling
+  const ttsCallbacks = useMemo(() => ({
+    onArticleStart: (article: Article, _rank: number) => {
+      setPlayingArticleId(article.id);
+      setIsPaused(false);
+    },
+    onArticleEnd: (article: Article, rank: number) => {
+      markAsRead(article.id);
+      showToast(`✅ Đã đọc xong tin #${rank} và chuyển sang tab Đã đọc`);
+    },
+    onPlaylistFinished: () => {
+      setPlayingArticleId(null);
+      setIsPaused(false);
+      showToast('🎉 Đã nghe xong toàn bộ các tin hot!');
+    },
+    onError: (err: any, article: Article) => {
+      console.warn('Lỗi âm thanh bài:', article.title, err);
+      markAsRead(article.id);
+      showToast(`⚠️ Bỏ qua tin bị sự cố âm thanh: ${article.title.substring(0, 30)}...`);
+    }
+  }), [markAsRead]);
 
+  // Phát 1 bài cụ thể (nếu bật tự chuyển tin, tiếp tục phát các tin chưa đọc kế tiếp)
+  const handlePlayArticle = useCallback((article: Article) => {
+    recordArticleClick(article.id);
     setPlayingArticleId(article.id);
     setIsPaused(false);
 
-    const rankIndex = stateRef.current.topArticles.findIndex((a) => a.id === article.id);
-    const rankNum = rankIndex >= 0 ? rankIndex + 1 : 1;
+    VietnameseTTS.setAutoplay(autoplayNext);
 
-    // Play audio for current article
-    VietnameseTTS.playArticleAudio(
-      article.id,
-      rankNum,
-      stateRef.current.selectedVoice,
-      article.title,
-      () => {
-        // onStart: Khi bài hiện tại bắt đầu phát ổn định, kích hoạt preload ngầm bài kế tiếp
-        setIsPaused(false);
-        const remainingUnread = stateRef.current.topArticles.filter(
-          (a) => !stateRef.current.readIds.has(a.id) && a.id !== article.id
-        );
-        if (remainingUnread.length > 0) {
-          const nextArticle = remainingUnread[0];
-          const nextRankIndex = stateRef.current.topArticles.findIndex((a) => a.id === nextArticle.id);
-          const nextRankNum = nextRankIndex >= 0 ? nextRankIndex + 1 : 1;
-          VietnameseTTS.preloadArticleAudio(nextArticle.id, nextRankNum, stateRef.current.selectedVoice);
-        }
-      },
-      () => {
-        // onEnd: Phát xong 1 lần -> Đánh dấu là tin đã đọc -> Chuyển qua tab Đã đọc
-        markAsRead(article.id);
-        setPlayingArticleId(null);
-        showToast(`✅ Đã đọc xong tin #${rankNum} và chuyển sang tab Đã đọc`);
+    // Xây dựng danh sách phát: bắt đầu bằng bài được chọn, sau đó là các bài chưa đọc còn lại
+    const remainingUnread = topArticles.filter((a) => !readIds.has(a.id) && a.id !== article.id);
+    const playlist = [article, ...remainingUnread];
 
-        // If autoplay continuous is enabled, find the next unread article and play it!
-        if (stateRef.current.autoplayNext) {
-          const updatedReadSet = new Set(stateRef.current.readIds);
-          updatedReadSet.add(article.id);
+    VietnameseTTS.startPlaylist(playlist, 0, ttsCallbacks, selectedVoice);
+  }, [topArticles, readIds, autoplayNext, selectedVoice, ttsCallbacks]);
 
-          const nextUnreadList = stateRef.current.topArticles.filter(
-            (a) => !updatedReadSet.has(a.id)
-          );
-
-          if (nextUnreadList.length > 0) {
-            const nextArticle = nextUnreadList[0];
-            // KHI TẮT MÀN HÌNH HOẶC CHUYỂN TAB TRÊN ĐIỆN THOẠI (document.hidden):
-            // Phải phát bài tiếp theo ngay lập tức không qua setTimeout
-            // để hệ điều hành iOS/Android không đình chỉ tab và duy trì âm thanh liên tục trong nền!
-            if (typeof document !== 'undefined' && document.hidden) {
-              handlePlayArticle(nextArticle);
-            } else {
-              setTimeout(() => {
-                handlePlayArticle(nextArticle);
-              }, 150);
-            }
-          } else {
-            showToast('🎉 Đã nghe xong toàn bộ các tin hot!');
-          }
-        }
-      },
-      (err) => {
-        console.error('Speech error:', err);
-        setPlayingArticleId(null);
-        showToast('⚠️ Không thể phát âm thanh tin này, tự động chuyển tiếp...');
-
-        // Tự động bỏ qua tin bị lỗi và phát tiếp tin kế tiếp, tránh việc toàn bộ danh sách bị đơ/dừng
-        if (stateRef.current.autoplayNext) {
-          markAsRead(article.id);
-          const updatedReadSet = new Set(stateRef.current.readIds);
-          updatedReadSet.add(article.id);
-
-          const nextUnreadList = stateRef.current.topArticles.filter(
-            (a) => !updatedReadSet.has(a.id)
-          );
-
-          if (nextUnreadList.length > 0) {
-            const nextArticle = nextUnreadList[0];
-            setTimeout(() => {
-              handlePlayArticle(nextArticle);
-            }, 600);
-          }
-        }
-      }
-    );
-  }, [markAsRead]);
-
-  // Handle Play All 30 articles from beginning
+  // Phát toàn bộ 30 tin hot từ đầu
   const handlePlayAll = () => {
     const unread = topArticles.filter((a) => !readIds.has(a.id));
     if (unread.length > 0) {
-      handlePlayArticle(unread[0]);
+      setPlayingArticleId(unread[0].id);
+      setIsPaused(false);
+      VietnameseTTS.setAutoplay(autoplayNext);
+      VietnameseTTS.startPlaylist(unread, 0, ttsCallbacks, selectedVoice);
     } else {
       showToast('Tất cả 30 tin đã được đọc!');
     }
@@ -455,26 +412,30 @@ export const App: React.FC = () => {
     if (playingArticleId) {
       markAsRead(playingArticleId);
     }
-    const unread = topArticles.filter(
-      (a) => !readIds.has(a.id) && a.id !== playingArticleId
-    );
-    if (unread.length > 0) {
-      handlePlayArticle(unread[0]);
-    } else {
-      handleStop();
-      showToast('Không còn tin chưa đọc tiếp theo');
-    }
+    VietnameseTTS.playNext();
+  };
+
+  const handleToggleAutoplay = () => {
+    const nextVal = !autoplayNext;
+    setAutoplayNext(nextVal);
+    VietnameseTTS.setAutoplay(nextVal);
+    try {
+      localStorage.setItem('tech_pulse_autoplay', String(nextVal));
+    } catch {}
+    showToast(nextVal ? '▶️ Đã bật tự động chuyển tin liên tục' : '⏸️ Đã tắt tự chuyển tin');
   };
 
   // Khởi tạo điều khiển MediaSession (màn hình khóa iOS/Android & tai nghe Bluetooth)
   useEffect(() => {
     VietnameseTTS.initMediaSession({
-      onPlay: () => handleResume(),
-      onPause: () => handlePause(),
-      onNext: () => handleNext(),
-      onStop: () => handleStop(),
+      onPlay: () => setIsPaused(false),
+      onPause: () => setIsPaused(true),
+      onStop: () => {
+        setPlayingArticleId(null);
+        setIsPaused(false);
+      },
     });
-  });
+  }, []);
 
   // Toggle read/unread status
   const handleToggleRead = (id: number) => {
@@ -638,8 +599,9 @@ export const App: React.FC = () => {
           onResume={handleResume}
           onStop={handleStop}
           onNext={handleNext}
-          onToggleAutoplay={() => setAutoplayNext(!autoplayNext)}
+          onToggleAutoplay={handleToggleAutoplay}
           onPlayAll={handlePlayAll}
+          onOpenPronunciationModal={() => setIsPronunciationOpen(true)}
         />
 
         {/* View Switcher Tabs: 30 Tin Hot (Chưa đọc) vs Quan Tâm (Sao) vs Đã đọc (30 ngày) */}
@@ -1022,6 +984,12 @@ export const App: React.FC = () => {
         onClose={() => setSelectedDeepArticle(null)}
         isStarred={selectedDeepArticle ? (starredIds.has(selectedDeepArticle.id) || !!selectedDeepArticle.is_starred) : false}
         onToggleStar={handleToggleStar}
+      />
+
+      {/* Pronunciation Dictionary Modal */}
+      <PronunciationModal
+        isOpen={isPronunciationOpen}
+        onClose={() => setIsPronunciationOpen(false)}
       />
     </div>
   );

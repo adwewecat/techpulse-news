@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, Square, SkipForward, Volume2, Gauge, Mic } from 'lucide-react';
+import { Play, Pause, Square, SkipForward, Volume2, Gauge, Mic, BookOpen } from 'lucide-react';
 import type { Article } from '../types/news';
 
 export const VOICE_OPTIONS = [
@@ -26,6 +26,7 @@ interface AudioPlayerBarProps {
   onNext: () => void;
   onToggleAutoplay: () => void;
   onPlayAll: () => void;
+  onOpenPronunciationModal?: () => void;
 }
 
 const SPEED_OPTIONS = [1.0, 1.25, 1.5, 1.75, 2.0];
@@ -47,6 +48,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
   onNext,
   onToggleAutoplay,
   onPlayAll,
+  onOpenPronunciationModal,
 }) => {
   return (
     <div
@@ -222,6 +224,31 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
           />
           <span>Tự chuyển tin</span>
         </label>
+
+        {/* Pronunciation config button */}
+        {onOpenPronunciationModal && (
+          <button
+            onClick={onOpenPronunciationModal}
+            title="Cấu hình phát âm từ viết tắt, tiếng Anh (VD: OpenAI, AI...)"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.3rem',
+              background: 'rgba(99, 102, 241, 0.15)',
+              border: '1px solid rgba(99, 102, 241, 0.35)',
+              borderRadius: '8px',
+              padding: '0.35rem 0.6rem',
+              color: '#a5b4fc',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+            }}
+          >
+            <BookOpen size={13} color="#818cf8" />
+            <span>Phát âm AI</span>
+          </button>
+        )}
 
         {isPlaying ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>

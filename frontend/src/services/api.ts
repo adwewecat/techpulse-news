@@ -199,3 +199,50 @@ export async function cleanupReadData(days: number = 3): Promise<{ status: strin
   return res.json();
 }
 
+export interface PronunciationItem {
+  original: string;
+  replacement: string;
+}
+
+export async function fetchPronunciationDictionary(): Promise<{ dictionary: PronunciationItem[]; total: number }> {
+  const res = await fetch(`${API_BASE}/tts/dictionary`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function addOrUpdatePronunciationWord(original: string, replacement: string): Promise<{ status: string; dictionary: PronunciationItem[]; total: number }> {
+  const res = await fetch(`${API_BASE}/tts/dictionary/word`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ original, replacement }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function deletePronunciationWord(original: string): Promise<{ status: string; dictionary: PronunciationItem[]; total: number }> {
+  const res = await fetch(`${API_BASE}/tts/dictionary/word/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ original }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function resetPronunciationDictionary(): Promise<{ status: string; dictionary: PronunciationItem[]; total: number }> {
+  const res = await fetch(`${API_BASE}/tts/dictionary/reset`, { method: 'POST' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function previewPronunciationAudio(text: string, voice?: string): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/tts/dictionary/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.blob();
+}
+
