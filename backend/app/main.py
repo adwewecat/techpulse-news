@@ -20,9 +20,18 @@ async def lifespan(app: FastAPI):
         storage.load()
         count = len(storage.articles)
         logger.info(f"Đã nạp thành công {count} bài viết từ JSON Storage!")
+
+        # 1. Tự động dọn dẹp các tin quá 3 ngày (D-3) và file audio cache thừa ngay khi khởi động
+        del_arts, _ = storage.cleanup_old_articles(days=3)
+        if del_arts > 0:
+            logger.info(f"Đã dọn dẹp {del_arts} bài viết cũ quá 3 ngày (D-3) và dọn audio cache.")
+
+        # 2. Cập nhật ngay tin đặc biệt theo giờ: Thời tiết TP.HCM (Hôm nay D & Ngày mai D+1) và Giá vàng Mi Hồng
+        from app.services.special_feeds import upsert_special_feeds
+        await upsert_special_feeds(storage)
     except Exception as e:
-        logger.error(f"Lỗi khi nạp dữ liệu storage: {e}")
-        count = 0
+        logger.error(f"Lỗi khi nạp dữ liệu storage hoặc tin đặc biệt: {e}")
+        count = len(storage.articles)
 
     # Bật tiến trình quét tự động 30 phút
     start_scheduler()

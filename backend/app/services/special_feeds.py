@@ -1,13 +1,16 @@
 """
-Special Feeds: Thời tiết TP.HCM D+1 & Giá vàng SJC hôm nay
-Mỗi loại chỉ cần 1 tin/ngày, cập nhật theo chu kỳ crawl.
+Special Feeds: Thời tiết TP.HCM (Hôm nay D & Ngày mai D+1) và Giá vàng Mi Hồng
+- Cập nhật liên tục theo giờ trong ngày
+- Tuyệt đối không lưu/nói ngày cũ, chỉ giữ ngày hiện tại (D) và ngày kế (D+1)
 """
 import logging
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from pathlib import Path
 
 import httpx
+from app.core.config import settings
 
 logger = logging.getLogger("special_feeds")
 
@@ -23,10 +26,10 @@ VN_WEEKDAYS = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu",
 WEATHER_DESCS = {
     "Sunny": "Nắng đẹp",
     "Clear": "Trời quang",
-    "Partly cloudy": "Nhiều mây",
+    "Partly cloudy": "Nhiều mây, có lúc hửng nắng",
     "Cloudy": "Nhiều mây",
     "Overcast": "Trời âm u",
-    "Mist": "Sương mù",
+    "Mist": "Sương mù nhẹ",
     "Fog": "Sương mù",
     "Light rain": "Mưa nhỏ",
     "Moderate rain": "Mưa vừa",
@@ -34,7 +37,7 @@ WEATHER_DESCS = {
     "Patchy rain possible": "Có thể có mưa rải rác",
     "Light drizzle": "Mưa phùn",
     "Thundery outbreaks possible": "Có thể có dông",
-    "Blowing snow": "Tuyết",
+    "Blowing snow": "Tuyết rơi",
     "Light snow": "Tuyết nhẹ",
     "Moderate or heavy rain shower": "Mưa rào vừa đến lớn",
     "Light rain shower": "Mưa rào nhỏ",
@@ -46,6 +49,8 @@ WEATHER_DESCS = {
 
 def _translate_weather(desc: str) -> str:
     """Dịch mô tả thời tiết tiếng Anh sang tiếng Việt."""
+    if not desc:
+        return "Nhiều mây"
     for eng, vi in WEATHER_DESCS.items():
         if eng.lower() in desc.lower():
             return vi
@@ -53,14 +58,19 @@ def _translate_weather(desc: str) -> str:
 
 async def fetch_weather_hcmc() -> Optional[Dict[str, Any]]:
     """
-    Lấy thời tiết TP.HCM cho ngày mai từ wttr.in (miễn phí, không cần API key).
-    Trả về dict bài viết dạng article, hoặc None nếu lỗi.
+    Lấy thời tiết TP.HCM cho cả ngày hiện tại (D) VÀ ngày mai (D+1), kèm số liệu theo giờ từ wttr.in.
+    Không lấy thời tiết ngày cũ.
     """
     url = "https://wttr.in/Ho+Chi+Minh+City?format=j1"
     now_vn = datetime.now(timezone(timedelta(hours=7)))
+    today_str = now_vn.strftime("%Y-%m-%d")
+    today_display = now_vn.strftime("%d/%m/%Y")
+    current_time_str = now_vn.strftime("%H:%M")
+    weekday_today = VN_WEEKDAYS[now_vn.weekday()]
+
     tomorrow_vn = now_vn + timedelta(days=1)
-    tomorrow_date_str = tomorrow_vn.strftime("%d/%m/%Y")
-    tomorrow_weekday = VN_WEEKDAYS[tomorrow_vn.weekday()]
+    tomorrow_display = tomorrow_vn.strftime("%d/%m/%Y")
+    weekday_tomorrow = VN_WEEKDAYS[tomorrow_vn.weekday()]
 
     try:
         async with httpx.AsyncClient(timeout=10.0, headers=HEADERS) as client:
@@ -70,60 +80,58 @@ async def fetch_weather_hcmc() -> Optional[Dict[str, Any]]:
                 return None
             data = res.json()
 
-        weather = data.get("weather", [])
-        # weather[0] = hôm nay, weather[1] = ngày mai
-        tomorrow_weather = weather[1] if len(weather) > 1 else (weather[0] if weather else None)
-        if not tomorrow_weather:
-            return None
+        # 1. Điều kiện hiện tại (theo giờ thực)
+        curr = data.get("current_condition", [{}])[0] if data.get("current_condition") else {}
+        temp_now = curr.get("temp_C", "28")
+        feels_like = curr.get("FeelsLikeC", temp_now)
+        humidity_now = curr.get("humidity", "75")
+        desc_now_raw = curr.get("weatherDesc", [{}])[0].get("value", "") if curr.get("weatherDesc") else ""
+        desc_now_vi = _translate_weather(desc_now_raw)
 
-        hourly = tomorrow_weather.get("hourly", [])
-        # Lấy buổi sáng (6h), trưa (12h), chiều tối (18h)
-        temp_max = tomorrow_weather.get("maxtempC", "?")
-        temp_min = tomorrow_weather.get("mintempC", "?")
-        # Lấy % mưa trung bình các khung giờ
-        rain_pcts = []
-        desc_parts = []
-        for h in hourly:
-            pct = h.get("chanceofrain", "0")
-            try:
-                rain_pcts.append(int(pct))
-            except Exception:
-                pass
-            desc_raw = ""
-            if h.get("weatherDesc"):
-                desc_raw = h["weatherDesc"][0].get("value", "") if h["weatherDesc"] else ""
-            if desc_raw:
-                desc_parts.append(desc_raw)
+        weather_days = data.get("weather", [])
+        # weather_days[0] = hôm nay (D), weather_days[1] = ngày mai (D+1)
+        today_w = weather_days[0] if len(weather_days) > 0 else {}
+        tomorrow_w = weather_days[1] if len(weather_days) > 1 else {}
 
-        avg_rain = int(sum(rain_pcts) / len(rain_pcts)) if rain_pcts else 0
-        # Lấy mô tả phổ biến nhất
+        # Dữ liệu hôm nay (D)
+        temp_min_today = today_w.get("mintempC", "24")
+        temp_max_today = today_w.get("maxtempC", "32")
+        rain_today = [int(h.get("chanceofrain", 0)) for h in today_w.get("hourly", []) if h.get("chanceofrain")]
+        avg_rain_today = int(sum(rain_today) / len(rain_today)) if rain_today else 40
+
+        # Dữ liệu ngày mai (D+1)
+        temp_min_tom = tomorrow_w.get("mintempC", "24")
+        temp_max_tom = tomorrow_w.get("maxtempC", "32")
+        rain_tom = [int(h.get("chanceofrain", 0)) for h in tomorrow_w.get("hourly", []) if h.get("chanceofrain")]
+        avg_rain_tom = int(sum(rain_tom) / len(rain_tom)) if rain_tom else 45
+        desc_tom_parts = [h["weatherDesc"][0].get("value", "") for h in tomorrow_w.get("hourly", []) if h.get("weatherDesc")]
         from collections import Counter
-        top_desc = Counter(desc_parts).most_common(1)[0][0] if desc_parts else "Nhiều mây"
-        top_desc_vi = _translate_weather(top_desc)
+        top_desc_tom = Counter(desc_tom_parts).most_common(1)[0][0] if desc_tom_parts else "Partly cloudy"
+        desc_tom_vi = _translate_weather(top_desc_tom)
 
-        # Lấy UV index và độ ẩm trưa
-        noon_hourly = next((h for h in hourly if h.get("time") == "1200"), hourly[len(hourly)//2] if hourly else {})
-        humidity = noon_hourly.get("humidity", "?")
-        uv_index = tomorrow_weather.get("uvIndex", "?")
-
-        # Cấu trúc cảnh báo mưa
-        if avg_rain >= 70:
-            rain_note = f"Xác suất mưa cao ({avg_rain}%), nhớ mang theo áo mưa."
-        elif avg_rain >= 40:
-            rain_note = f"Có thể có mưa rào ({avg_rain}%), nên đề phòng."
+        # Cảnh báo mưa hôm nay
+        if avg_rain_today >= 70:
+            rain_tip_today = f"Hôm nay xác suất mưa rất cao ({avg_rain_today}%), bắt buộc mang áo mưa khi ra ngoài."
+        elif avg_rain_today >= 40:
+            rain_tip_today = f"Hôm nay có khả năng mưa rào rải rác ({avg_rain_today}%), nên chuẩn bị sẵn áo mưa."
         else:
-            rain_note = f"Ít khả năng mưa ({avg_rain}%)."
+            rain_tip_today = f"Hôm nay trời ráo, ít khả năng mưa ({avg_rain_today}%)."
 
-        title = f"Thời tiết TP.HCM {tomorrow_weekday} {tomorrow_date_str}: {top_desc_vi}, {temp_min}–{temp_max}°C"
+        title = f"Thời tiết TP.HCM hôm nay {today_display} & ngày mai (D+1) [{current_time_str}]: {desc_now_vi}, {temp_now}°C"
         summary = (
-            f"{top_desc_vi}, nhiệt độ từ {temp_min}°C đến {temp_max}°C. "
-            f"Độ ẩm {humidity}%, chỉ số UV {uv_index}. "
-            f"{rain_note}"
+            f"Thời tiết TP.HCM cập nhật lúc {current_time_str}: Hiện tại {temp_now}°C ({desc_now_vi}, cảm giác như {feels_like}°C, độ ẩm {humidity_now}%). "
+            f"Hôm nay {weekday_today} {today_display} (D): Nhiệt độ {temp_min_today}–{temp_max_today}°C. {rain_tip_today} "
+            f"Dự báo ngày mai {weekday_tomorrow} {tomorrow_display} (D+1): {desc_tom_vi}, nhiệt độ {temp_min_tom}–{temp_max_tom}°C, xác suất mưa khoảng {avg_rain_tom}%."
         )
 
-        today_str = now_vn.strftime("%Y-%m-%d")
+        bullets = [
+            f"Hiện tại ({current_time_str}): {desc_now_vi}, {temp_now}°C (cảm giác {feels_like}°C), độ ẩm {humidity_now}%.",
+            f"Hôm nay {weekday_today} (D): {temp_min_today}–{temp_max_today}°C, xác suất mưa {avg_rain_today}%.",
+            f"Ngày mai {weekday_tomorrow} (D+1): {desc_tom_vi}, {temp_min_tom}–{temp_max_tom}°C, xác suất mưa {avg_rain_tom}%."
+        ]
+
         return {
-            "url": f"special://weather-hcmc/{today_str}",
+            "url": "special://weather-hcmc/current",
             "title": title,
             "source_name": "Dự báo thời tiết TP.HCM",
             "source_domain": "wttr.in",
@@ -131,10 +139,10 @@ async def fetch_weather_hcmc() -> Optional[Dict[str, Any]]:
             "region": "vietnam",
             "category": "special",
             "summary_short": summary,
-            "summary_bullets": [],
+            "summary_bullets": bullets,
             "content_raw": summary,
             "image_url": "https://cdn-icons-png.flaticon.com/512/1163/1163661.png",
-            "tags": ["thời tiết", "tp.hcm", "dự báo"],
+            "tags": ["thời tiết", "tp.hcm", "dự báo hôm nay", "dự báo ngày mai"],
             "published_at": now_vn.isoformat(),
             "hot_score": 9999.0,
             "velocity_score": 0.0,
@@ -149,15 +157,15 @@ async def fetch_weather_hcmc() -> Optional[Dict[str, Any]]:
         logger.warning(f"Lỗi khi lấy thời tiết TP.HCM: {e}")
         return None
 
-
 async def fetch_gold_price() -> Optional[Dict[str, Any]]:
     """
-    Lấy giá vàng Mi Hồng hôm nay từ API chính thức: api.mihong.com
-    Trả về dict article, hoặc None nếu lỗi.
+    Lấy giá vàng Mi Hồng trực tiếp theo giờ trong ngày từ API chính thức: api.mihong.com.
+    Chỉ hiển thị giá hôm nay, cập nhật theo giờ.
     """
     now_vn = datetime.now(timezone(timedelta(hours=7)))
     today_str = now_vn.strftime("%Y-%m-%d")
     today_display = now_vn.strftime("%d/%m/%Y")
+    current_time_str = now_vn.strftime("%H:%M")
 
     mihong_url = "https://api.mihong.com/v1/gold-prices?market=domestic"
     api_headers = {
@@ -173,14 +181,13 @@ async def fetch_gold_price() -> Optional[Dict[str, Any]]:
             if res.status_code == 200:
                 data = res.json()
                 if isinstance(data, list) and data:
-                    # Lấy dữ liệu vàng SJC (ưu tiên) hoặc dòng đầu
                     sjc_item = next((x for x in data if x.get("code") == "SJC"), data[0])
                     vang_999 = next((x for x in data if x.get("code") == "999"), None)
                     
                     buy = sjc_item.get("buyingPrice", 0)
                     sell = sjc_item.get("sellingPrice", 0)
                     sell_change = sjc_item.get("sellChange", 0)
-                    date_time = sjc_item.get("dateTime", today_display)
+                    date_time = sjc_item.get("dateTime", f"{today_display} {current_time_str}")
                     
                     def fmt(n: float) -> str:
                         try:
@@ -199,38 +206,44 @@ async def fetch_gold_price() -> Optional[Dict[str, Any]]:
                     change_str = fmt_change(sell_change)
                     change_note = f" ({change_str} so với phiên trước)" if change_str else ""
 
-                    # Thêm vàng 999 nếu có
                     extra = ""
+                    bullets = [
+                        f"Vàng SJC: Mua vào {fmt(buy)} – Bán ra {fmt(sell)}{change_note}."
+                    ]
                     if vang_999:
-                        extra = f" Vàng 9999: Mua {fmt(vang_999.get('buyingPrice', 0))} – Bán {fmt(vang_999.get('sellingPrice', 0))}."
+                        v999_buy = vang_999.get('buyingPrice', 0)
+                        v999_sell = vang_999.get('sellingPrice', 0)
+                        extra = f" Nhẫn Vàng 9999: Mua {fmt(v999_buy)} – Bán {fmt(v999_sell)}."
+                        bullets.append(f"Vàng 9999: Mua {fmt(v999_buy)} – Bán {fmt(v999_sell)}.")
+                    bullets.append(f"Thời gian niêm yết: {date_time} (Mi Hồng).")
 
-                    title = f"Giá vàng Mi Hồng hôm nay {today_display}: SJC Mua {fmt(buy)} – Bán {fmt(sell)}"
+                    title = f"Giá vàng Mi Hồng hôm nay {today_display} [{date_time}]: SJC Mua {fmt(buy)} – Bán {fmt(sell)}"
                     summary = (
-                        f"Giá vàng Mi Hồng cập nhật lúc {date_time}: "
+                        f"Giá vàng Mi Hồng cập nhật lúc {date_time} ngày {today_display}: "
                         f"Vàng SJC mua vào {fmt(buy)}, bán ra {fmt(sell)}{change_note}.{extra}"
                     )
-                    return _make_gold_article(title, summary, today_str, now_vn, "mihong.com")
+                    return _make_gold_article(title, summary, bullets, today_str, now_vn)
 
     except Exception as e:
         logger.warning(f"Mi Hồng API lỗi: {e}")
 
-    # Fallback: thông báo không lấy được
-    title = f"Giá vàng Mi Hồng hôm nay {today_display}"
-    summary = f"Giá vàng Mi Hồng ngày {today_display} đang cập nhật. Truy cập mihong.com để xem giá mới nhất."
-    return _make_gold_article(title, summary, today_str, now_vn, "mihong.com")
+    # Fallback
+    title = f"Giá vàng Mi Hồng hôm nay {today_display} [{current_time_str}]"
+    summary = f"Giá vàng Mi Hồng ngày {today_display} đang cập nhật phiên giao dịch mới nhất lúc {current_time_str}."
+    bullets = [f"Cập nhật lúc: {current_time_str}"]
+    return _make_gold_article(title, summary, bullets, today_str, now_vn)
 
-
-def _make_gold_article(title: str, summary: str, date_str: str, now_vn: datetime, source_domain: str = "mihong.com") -> Dict[str, Any]:
+def _make_gold_article(title: str, summary: str, bullets: List[str], date_str: str, now_vn: datetime) -> Dict[str, Any]:
     return {
-        "url": f"special://gold-price/{date_str}",
+        "url": "special://gold-price/current",
         "title": title,
         "source_name": "Giá vàng Mi Hồng",
-        "source_domain": source_domain,
+        "source_domain": "mihong.com",
         "source_tier": 1.0,
         "region": "vietnam",
         "category": "special",
         "summary_short": summary,
-        "summary_bullets": [],
+        "summary_bullets": bullets,
         "content_raw": summary,
         "image_url": "https://cdn-icons-png.flaticon.com/512/2933/2933279.png",
         "tags": ["giá vàng", "mi hồng", "sjc", "tài chính"],
@@ -244,12 +257,13 @@ def _make_gold_article(title: str, summary: str, date_str: str, now_vn: datetime
         "special_date": date_str,
     }
 
-
 async def upsert_special_feeds(storage) -> None:
     """
-    Lấy và cập nhật (upsert) 2 tin đặc biệt: thời tiết D+1 và giá vàng hôm nay.
-    - Nếu bài viết với URL đặc biệt đã tồn tại → cập nhật nội dung
-    - Nếu chưa có → tạo mới (và xóa bài cũ cùng loại ngày trước)
+    Lấy và cập nhật (upsert) 2 tin đặc biệt:
+    1. Thời tiết TP.HCM (Hôm nay D & Ngày mai D+1 theo giờ)
+    2. Giá vàng Mi Hồng (cập nhật theo giờ)
+    - Tự động xóa sạch các bài viết thời tiết/giá vàng ngày cũ
+    - Xóa audio cache cũ của bài đặc biệt để TTS đọc giờ và số liệu mới nhất
     """
     feeds = []
 
@@ -267,37 +281,52 @@ async def upsert_special_feeds(storage) -> None:
     else:
         logger.warning("[SpecialFeed] Không lấy được giá vàng SJC")
 
+    now_vn = datetime.now(timezone(timedelta(hours=7)))
+    today_str = now_vn.strftime("%Y-%m-%d")
+    audio_dir = settings.DATA_FILE.parent / "audio_cache"
+
     for feed in feeds:
         url = feed["url"]
         special_type = feed.get("special_type", "")
-        today_date = feed.get("special_date", "")
 
-        if storage.exists_url(url):
-            # Cập nhật bài đã có (cùng ngày)
-            existing_id = storage._url_index.get(url)
-            if existing_id:
-                storage.update_article(existing_id, {
-                    "title": feed["title"],
-                    "summary_short": feed["summary_short"],
-                    "content_raw": feed.get("content_raw", ""),
-                    "published_at": feed["published_at"],
-                    "hot_score": feed["hot_score"],
-                })
-                logger.info(f"[SpecialFeed] Đã cập nhật: {url}")
+        # 1. Xóa toàn bộ các bài viết thời tiết / giá vàng của NGÀY CŨ
+        old_articles = [
+            a for a in storage.articles
+            if (a.get("special_type") == special_type or a.get("category") == "special" and special_type in a.get("url", ""))
+            and a.get("special_date", "") != today_str
+        ]
+        for old in old_articles:
+            old_id = old.get("id")
+            # Xóa audio cache của bài cũ
+            if audio_dir.exists() and old_id:
+                for f in audio_dir.glob(f"*_{old_id}_*.mp3"):
+                    try:
+                        f.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            storage.update_article(old_id, {"is_spam": True, "hot_score": -1.0, "published_at": "2000-01-01T00:00:00"})
+
+        # 2. Cập nhật bài hiện tại
+        existing_id = storage._url_index.get(url)
+        if existing_id:
+            storage.update_article(existing_id, {
+                "title": feed["title"],
+                "summary_short": feed["summary_short"],
+                "summary_bullets": feed.get("summary_bullets", []),
+                "content_raw": feed.get("content_raw", ""),
+                "published_at": feed["published_at"],
+                "hot_score": feed["hot_score"],
+                "is_spam": False,
+                "special_date": today_str
+            })
+            # Xóa audio cache để khi bấm nghe sẽ sinh audio mới theo giờ mới
+            if audio_dir.exists():
+                for f in audio_dir.glob(f"*_{existing_id}_*.mp3"):
+                    try:
+                        f.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            logger.info(f"[SpecialFeed] Đã cập nhật theo giờ: {url}")
         else:
-            # Xóa bài cũ cùng loại (ngày khác) trước khi thêm bài mới
-            if special_type:
-                old_articles = [
-                    a for a in storage.articles
-                    if a.get("special_type") == special_type
-                    and a.get("special_date", "") != today_date
-                ]
-                for old in old_articles:
-                    old_url = old.get("url", "")
-                    # Đánh dấu spam để loại khỏi danh sách hiển thị
-                    storage.update_article(old["id"], {"is_spam": True, "hot_score": -1.0})
-                    logger.info(f"[SpecialFeed] Ẩn bài cũ: {old_url}")
-
-            storage.add_article(feed)
-            logger.info(f"[SpecialFeed] Đã thêm mới: {url}")
-
+            new_art = storage.add_article(feed)
+            logger.info(f"[SpecialFeed] Đã thêm mới: {url} (ID: {new_art.get('id')})")

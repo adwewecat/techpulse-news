@@ -72,52 +72,55 @@ EN_STOPWORDS = {
     'after', 'years', 'space', 'border', 'new', 'what', 'who', 'where'
 }
 
-def is_vietnamese_text(text: str) -> bool:
-    """Xác định chính xác văn bản có phải tiếng Việt hay không"""
+def needs_vi_translation(text: str) -> bool:
+    """Xác định chính xác văn bản có chứa tiếng Anh hoặc cần dịch sang tiếng Việt hay không"""
     if not text or not text.strip():
-        return True
+        return False
 
     clean_text = text.strip()
-    # 1. Đếm ký tự có dấu thanh tiếng Việt đặc trưng
     vi_chars = sum(1 for c in clean_text.lower() if c in VIETNAMESE_DIACRITICS)
-    if vi_chars >= 2:
-        return True
-
-    # 2. Tách từ
-    words = re.findall(r'\b[a-zA-Zàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]+\b', clean_text.lower())
+    words = [w.lower() for w in re.findall(r'[a-zA-Zàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]+', clean_text)]
     if not words:
-        return True
+        return False
 
-    if vi_chars >= 1 and len(words) <= 3:
-        return True
-
-    # 3. So khớp từ nối phổ biến
     vi_matches = sum(1 for w in words if w in VI_STOPWORDS)
     en_matches = sum(1 for w in words if w in EN_STOPWORDS)
 
-    if vi_matches > en_matches and vi_matches > 0:
+    # 1. Có từ nối tiếng Anh rõ rệt và không có từ nối tiếng Việt
+    if en_matches >= 1 and vi_matches == 0:
+        return True
+    if en_matches > vi_matches:
         return True
 
-    if en_matches > 0 and vi_chars == 0:
-        return False
-
-    # Nếu câu có >= 2 từ mà không chứa bất kỳ ký tự dấu tiếng Việt nào -> Tiếng nước ngoài
+    # 2. Hoàn toàn không có ký tự dấu tiếng Việt nào và có >= 2 từ
     if vi_chars == 0 and len(words) >= 2:
-        return False
+        return True
 
-    return vi_chars > 0
+    # 3. Mật độ dấu tiếng Việt quá thấp (< 3.5%) trong văn bản dài > 25 ký tự mà không có từ nối tiếng Việt
+    if len(clean_text) > 25 and (vi_chars / len(clean_text)) < 0.035 and vi_matches == 0:
+        return True
+
+    # 4. Có từ 1 từ tiếng Anh ngắn không dấu
+    if vi_chars == 0 and len(clean_text) >= 3:
+        return True
+
+    return False
+
+def is_vietnamese_text(text: str) -> bool:
+    """Xác định văn bản đã là tiếng Việt hay chưa"""
+    return not needs_vi_translation(text)
 
 def is_english_text(text: str) -> bool:
     """Xác định văn bản có cần dịch sang tiếng Việt hay không"""
-    return not is_vietnamese_text(text)
+    return needs_vi_translation(text)
 
 async def translate_to_vietnamese(text: str, client: httpx.AsyncClient) -> str:
     """Dịch tiêu đề hoặc nội dung tiếng nước ngoài sang Tiếng Việt chuẩn xác 100%"""
     if not text or not text.strip():
         return text
 
-    # Nếu văn bản đã là tiếng Việt có dấu, không cần gọi dịch
-    if is_vietnamese_text(text):
+    # Nếu văn bản đã chắc chắn là tiếng Việt chuẩn và không cần dịch
+    if not needs_vi_translation(text):
         return text
 
     try:
@@ -364,8 +367,18 @@ async def get_article_speech(
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
             # Nếu là tin quốc tế hoặc có từ tiếng Anh, tự động dịch sang Tiếng Việt
-            title_vi = await translate_to_vietnamese(art.get("title", ""), client)
+            title_raw = art.get("title", "")
+            title_vi = await translate_to_vietnamese(title_raw, client)
             summary_vi = await translate_to_vietnamese(summary_text, client)
+
+            # Tự động cập nhật bản dịch tiếng Việt vào kho storage nếu trước đó lưu bằng tiếng Anh
+            updates = {}
+            if title_vi and title_vi != title_raw and needs_vi_translation(title_raw):
+                updates["title"] = title_vi
+            if summary_vi and summary_vi != summary_text and needs_vi_translation(summary_text):
+                updates["summary_short"] = summary_vi
+            if updates:
+                storage.update_article(art["id"], updates)
 
             title_clean = title_vi.strip().rstrip(".,;:!?")
             summary_clean = summary_vi.strip()
@@ -387,6 +400,10 @@ async def get_article_speech(
                     full_script = f"{title_clean}, {summary_clean}"
                 else:
                     full_script = f"{title_clean}."
+
+            # KIỂM TRA LẠI: Nếu script vẫn còn câu tiếng Anh, dịch toàn bộ sang tiếng Việt
+            if needs_vi_translation(full_script):
+                full_script = await translate_to_vietnamese(full_script, client)
 
             final_bytes = await synthesize_speech(full_script, selected_voice, client)
 

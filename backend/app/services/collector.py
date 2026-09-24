@@ -219,17 +219,29 @@ async def run_crawl_cycle(storage_instance: Optional[JSONStorage] = None) -> Opt
                         summary_raw = body_extra
 
                 # Tự động dịch sang Tiếng Việt nếu là tin quốc tế hoặc văn bản chưa có dấu tiếng Việt
-                from app.api.tts import is_vietnamese_text, translate_to_vietnamese
-                if src.get("region") == "world" or src.get("category") == "tech_world" or not is_vietnamese_text(title) or not is_vietnamese_text(summary_raw):
-                    if not is_vietnamese_text(title):
+                from app.api.tts import needs_vi_translation, translate_to_vietnamese
+                is_world = src.get("region") == "world" or src.get("category") == "tech_world"
+                if is_world or needs_vi_translation(title) or needs_vi_translation(summary_raw):
+                    if is_world or needs_vi_translation(title):
                         title = await translate_to_vietnamese(title, client)
-                    if not is_vietnamese_text(summary_raw):
+                    if is_world or needs_vi_translation(summary_raw):
                         summary_raw = await translate_to_vietnamese(summary_raw, client)
 
                 # 1. Pipeline AI: Lọc rác + Tóm tắt + Auto-tags
                 is_spam, tldr, bullets, tags = process_article_ai(title, summary_raw)
                 if is_spam:
                     continue
+
+                # Đảm bảo tldr và bullets luôn là tiếng Việt chuẩn 100%
+                if is_world or needs_vi_translation(tldr):
+                    tldr = await translate_to_vietnamese(tldr, client)
+
+                clean_bullets = []
+                for b in bullets:
+                    if is_world or needs_vi_translation(b):
+                        b = await translate_to_vietnamese(b, client)
+                    clean_bullets.append(b)
+                bullets = clean_bullets
 
                 # 2. Detect trùng & Gom cụm Story
                 cluster = find_duplicate_cluster(
@@ -323,12 +335,20 @@ async def run_crawl_cycle(storage_instance: Optional[JSONStorage] = None) -> Opt
         # 5. Cập nhật lại toàn bộ điểm số nóng theo thời gian thực
         recalculate_all_scores(st)
 
-        # 6. Cập nhật tin đặc biệt: Thời tiết TP.HCM D+1 & Giá vàng hôm nay
+        # 6. Cập nhật tin đặc biệt: Thời tiết TP.HCM (Hôm nay D & Ngày mai D+1 theo giờ) và Giá vàng Mi Hồng
         try:
             from app.services.special_feeds import upsert_special_feeds
             await upsert_special_feeds(st)
         except Exception as sf_err:
             logger.warning(f"Lỗi khi cập nhật tin đặc biệt: {sf_err}")
+
+        # 7. Tự động xóa tin tức cũ quá 3 ngày (D-3) và dọn dẹp audio cache
+        try:
+            del_arts, del_logs = st.cleanup_old_articles(days=3)
+            if del_arts > 0:
+                logger.info(f"Đã tự động xóa {del_arts} bài cũ quá 3 ngày (D-3) và dọn audio cache.")
+        except Exception as cl_err:
+            logger.warning(f"Lỗi khi dọn dẹp tin D-3: {cl_err}")
 
         # Cập nhật Log
         st.update_crawl_log(log["id"], {

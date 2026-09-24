@@ -19,7 +19,7 @@ import {
 
 const STORAGE_READ_ITEMS_KEY = 'tech_pulse_read_items_v2';
 const STORAGE_STARRED_KEY = 'tech_pulse_starred_ids_v1';
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000; // 48 giờ
 
 export const App: React.FC = () => {
   // Anonymous guest user ID (no login required, auto-cached)
@@ -40,7 +40,7 @@ export const App: React.FC = () => {
     }
   });
 
-  // Map of read article IDs to timestamp (readAt) - Tự động xóa sau 30 ngày
+  // Map of read article IDs to timestamp (readAt) - Tự động xóa tin đã đọc quá 48 giờ
   const [readMap, setReadMap] = useState<Map<number, number>>(() => {
     const map = new Map<number, number>();
     const now = Date.now();
@@ -49,7 +49,7 @@ export const App: React.FC = () => {
       if (saved) {
         const items: { id: number; readAt: number }[] = JSON.parse(saved);
         items.forEach((it) => {
-          if (now - it.readAt <= THIRTY_DAYS_MS) {
+          if (now - it.readAt <= FORTY_EIGHT_HOURS_MS) {
             map.set(it.id, it.readAt);
           }
         });
@@ -169,7 +169,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Mark article as read (Chỉ lưu trữ 30 ngày)
+  // Mark article as read (Tự động xóa tin đã đọc quá 48 giờ)
   const markAsRead = useCallback((id: number) => {
     // Lưu tức thì lên backend cho người dùng ẩn danh
     markUserReadApi(userId, id);
@@ -177,11 +177,11 @@ export const App: React.FC = () => {
     setReadMap((prev) => {
       const next = new Map(prev);
       next.set(id, Date.now());
-      // Lọc bỏ bất kỳ tin nào đọc quá 30 ngày
+      // Lọc bỏ bất kỳ tin nào đọc quá 48 giờ
       const now = Date.now();
       const prunedArray: { id: number; readAt: number }[] = [];
       next.forEach((readAt, artId) => {
-        if (now - readAt <= THIRTY_DAYS_MS) {
+        if (now - readAt <= FORTY_EIGHT_HOURS_MS) {
           prunedArray.push({ id: artId, readAt });
         }
       });
@@ -225,7 +225,7 @@ export const App: React.FC = () => {
       try {
         localStorage.removeItem(STORAGE_READ_ITEMS_KEY);
       } catch {}
-      cleanupReadData(30).catch(() => {});
+      cleanupReadData(3).catch(() => {});
       showToast('Đã làm mới danh sách tin đã đọc');
       // Tải lại 30 tin hot bao gồm cả các tin vừa làm mới
       load30HotNews();
@@ -293,8 +293,8 @@ export const App: React.FC = () => {
     load30HotNews();
     fetchCrawlStatus().then(setCrawlStatus).catch(() => {});
     fetchStats().then(setStats).catch(() => {});
-    // Tự động dọn dẹp tin đã đọc cũ hơn 30 ngày (bảo toàn tin đánh dấu sao)
-    cleanupReadData(30).catch(() => {});
+    // Tự động dọn dẹp tin đã đọc cũ hơn 3 ngày (bảo toàn tin đánh dấu sao)
+    cleanupReadData(3).catch(() => {});
   }, [load30HotNews]);
 
   // Periodic poll for status
@@ -709,7 +709,7 @@ export const App: React.FC = () => {
             <span>⭐ Quan Tâm ({starredArticles.length})</span>
           </button>
 
-          {/* Tab 3: Đã Đọc (Lưu 30 ngày) */}
+          {/* Tab 3: Đã Đọc (Lưu 48 giờ) */}
           <button
             onClick={() => setViewTab('read')}
             style={{
@@ -734,7 +734,7 @@ export const App: React.FC = () => {
           >
             <CheckCheck size={16} color={viewTab === 'read' ? '#10b981' : 'var(--text-muted)'} />
             <span>✅ Đã Đọc ({readIds.size})</span>
-            <span style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 500 }}>(30 ngày)</span>
+            <span style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 500 }}>(48h)</span>
           </button>
         </div>
 

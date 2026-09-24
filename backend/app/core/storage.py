@@ -174,9 +174,15 @@ class JSONStorage:
             filtered = []
             search_lower = search.lower().strip() if search else None
             tag_lower = tag.lower().strip() if tag else None
+            now_utc = datetime.utcnow()
+            cutoff_3d = now_utc - timedelta(days=3)
 
             for a in self.articles:
                 if a.get("is_spam", False):
+                    continue
+                # Giới hạn tối đa 3 ngày (D, D-1, D-2), D-3 không lấy
+                pub = parse_dt(a.get("published_at"))
+                if pub < cutoff_3d and not a.get("is_starred", False):
                     continue
                 if only_primary and not a.get("is_primary", True):
                     continue
@@ -211,12 +217,45 @@ class JSONStorage:
 
     def get_top_6h_articles(self, region: Optional[str] = None, limit: int = 30, exclude_ids: Optional[set] = None) -> List[Dict[str, Any]]:
         with self.lock:
-            # Nếu người dùng chọn riêng Thế Giới (world), 100% là tin công nghệ quốc tế
+            now_utc = datetime.utcnow()
+            cutoff_3d = now_utc - timedelta(days=3)     # 72h: D-3 trở đi xóa
+            cutoff_48h = now_utc - timedelta(hours=48)  # 48h: ranh giới giữa D-1 và D-2
+            now_vn = now_utc + timedelta(hours=7)
+            today_str = now_vn.strftime("%Y-%m-%d")
+
+            def is_eligible(a: Dict[str, Any]) -> bool:
+                if a.get("is_spam", False):
+                    return False
+                
+                # Tin đặc biệt (thời tiết / giá vàng): Chỉ lấy của ngày hiện tại, không nói ngày cũ
+                if a.get("category") == "special":
+                    sdate = a.get("special_date", "")
+                    if sdate and sdate != today_str:
+                        return False
+                    return True
+
+                pub = parse_dt(a.get("published_at"))
+                # D-3 (> 72h): Tuyệt đối không lấy
+                if pub < cutoff_3d and not a.get("is_starred", False):
+                    return False
+
+                # Quá 48h (D-2: từ 48h đến 72h):
+                # "tin tức load thì cứ quá 48h là tự xóa hết tin cũ, chỉ lấy tin tức từ ngày D-2 nếu chưa đọc"
+                if pub < cutoff_48h:
+                    if exclude_ids and a.get("id") in exclude_ids:
+                        return False  # Đã đọc -> tự động loại bỏ tin cũ quá 48h
+                    return True  # Chưa đọc -> vẫn lấy để người dùng đọc kịp thời
+
+                # Trong vòng 48h (D và D-1):
+                if exclude_ids and a.get("id") in exclude_ids:
+                    return False
+                return True
+
+            # Nếu người dùng chọn riêng Thế Giới (world)
             if region == "world":
                 candidates = [
                     a for a in self.articles 
-                    if not a.get("is_spam", False) and a.get("is_primary", True) and a.get("region") == "world"
-                    and (not exclude_ids or a.get("id") not in exclude_ids)
+                    if a.get("is_primary", True) and a.get("region") == "world" and is_eligible(a)
                 ]
                 candidates.sort(key=lambda x: (x.get("hot_score", 0.0), parse_dt(x.get("published_at"))), reverse=True)
                 seen_clusters = set()
@@ -228,14 +267,15 @@ class JSONStorage:
                         deduped.append(art)
                     if len(deduped) >= limit:
                         break
-                # Nếu thiếu do đã đọc nhiều, lấy thêm các tin đã đọc gần nhất để luôn đủ số lượng
-                if len(deduped) < limit and exclude_ids:
+                # Nếu thiếu do đã đọc nhiều, chỉ bù các tin trong vòng 3 ngày (pub >= cutoff_3d)
+                if len(deduped) < limit:
                     for art in self.articles:
                         if not art.get("is_spam", False) and art.get("is_primary", True) and art.get("region") == "world":
-                            cid = art.get("cluster_id") or f"art_{art['id']}"
-                            if cid not in seen_clusters:
-                                seen_clusters.add(cid)
-                                deduped.append(art)
+                            if parse_dt(art.get("published_at")) >= cutoff_3d:
+                                cid = art.get("cluster_id") or f"art_{art['id']}"
+                                if cid not in seen_clusters:
+                                    seen_clusters.add(cid)
+                                    deduped.append(art)
                         if len(deduped) >= limit:
                             break
                 return deduped
@@ -248,11 +288,9 @@ class JSONStorage:
             other_candidates = []
 
             for a in self.articles:
-                if a.get("is_spam", False) or not a.get("is_primary", True):
+                if not a.get("is_primary", True) or not is_eligible(a):
                     continue
                 if region and a.get("region") != region:
-                    continue
-                if exclude_ids and a.get("id") in exclude_ids:
                     continue
                 
                 if is_tech_article(a):
@@ -285,7 +323,7 @@ class JSONStorage:
                 if len(deduped_other) >= target_other:
                     break
 
-            # Nếu một bên thiếu tin do giới hạn bộ lọc, lấy thêm từ bên còn lại để luôn đủ số lượng
+            # Nếu một bên thiếu tin do giới hạn bộ lọc, lấy thêm từ bên còn lại
             if len(deduped_tech) < target_tech:
                 extra_needed = target_tech - len(deduped_tech)
                 for art in other_candidates:
@@ -316,27 +354,29 @@ class JSONStorage:
                 if len(mixed) >= limit:
                     break
 
-            # Ghim tin đặc biệt (thời tiết, giá vàng) lên đầu danh sách
+            # Ghim tin đặc biệt (thời tiết TP.HCM, giá vàng hôm nay) lên đầu danh sách
             special_articles = [
                 a for a in self.articles
-                if a.get("category") == "special" and not a.get("is_spam", False)
+                if a.get("category") == "special" and not a.get("is_spam", False) and is_eligible(a)
             ]
             # Sắp xếp: thời tiết (hot_score 9999) trước, giá vàng (9998) sau
             special_articles.sort(key=lambda x: x.get("hot_score", 0), reverse=True)
-            # Loại bỏ tin đặc biệt khỏi mixed nếu đã lọt vào
             special_ids = {a["id"] for a in special_articles}
             mixed = [a for a in mixed if a.get("id") not in special_ids]
             
             # Ghim đầu, đảm bảo tổng không vượt limit
             combined = special_articles + mixed
             
-            # Nếu chưa đủ limit và có exclude_ids (người dùng đã đọc gần hết), lấy bù các tin cũ để luôn có bài nghe
+            # Nếu chưa đủ limit và có exclude_ids (đã đọc gần hết), lấy bù các tin trong vòng 3 ngày (pub >= cutoff_3d)
             if len(combined) < limit and exclude_ids:
                 seen_all_ids = {a["id"] for a in combined}
                 for a in self.articles:
                     if not a.get("is_spam", False) and a.get("is_primary", True) and a.get("id") not in seen_all_ids:
-                        combined.append(a)
-                        seen_all_ids.add(a["id"])
+                        pub = parse_dt(a.get("published_at"))
+                        # Tuyệt đối không lấy tin D-3 (> 72h)
+                        if pub >= cutoff_3d:
+                            combined.append(a)
+                            seen_all_ids.add(a["id"])
                     if len(combined) >= limit:
                         break
 
@@ -588,22 +628,41 @@ class JSONStorage:
                 "top_sources": top_sources
             }
 
-    def cleanup_old_articles(self, days: int = 30) -> Tuple[int, int]:
+    def cleanup_old_articles(self, days: int = 3) -> Tuple[int, int]:
         with self.lock:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            now = datetime.utcnow()
+            cutoff_3d = now - timedelta(days=days)
             initial_art_count = len(self.articles)
             initial_log_count = len(self.crawl_logs)
 
-            # Chỉ xóa tin cũ chưa đánh dấu sao
-            self.articles = [
-                a for a in self.articles
-                if parse_dt(a.get("published_at")) >= cutoff or a.get("is_starred", False)
-            ]
+            now_vn = now + timedelta(hours=7)
+            today_str = now_vn.strftime("%Y-%m-%d")
 
-            # Xóa crawl log cũ
+            kept_articles = []
+            for a in self.articles:
+                pub = parse_dt(a.get("published_at"))
+                # 1. Xóa D-3 (> 72h)
+                if pub < cutoff_3d and not a.get("is_starred", False):
+                    continue
+                # 2. Xóa các tin đặc biệt cũ (ngày trước)
+                if a.get("category") == "special" or a.get("special_type"):
+                    if a.get("special_date") and a.get("special_date") != today_str:
+                        continue
+                kept_articles.append(a)
+
+            self.articles = kept_articles
+
+            # Xóa crawl log cũ > 3 ngày
             self.crawl_logs = [
                 l for l in self.crawl_logs
-                if parse_dt(l.get("started_at")) >= cutoff
+                if parse_dt(l.get("started_at")) >= cutoff_3d
+            ]
+
+            # Dọn cluster không còn bài viết
+            remaining_cids = {a.get("cluster_id") for a in self.articles if a.get("cluster_id")}
+            self.clusters = [
+                c for c in self.clusters
+                if c.get("id") in remaining_cids or parse_dt(c.get("last_seen_at")) >= cutoff_3d
             ]
 
             deleted_articles = initial_art_count - len(self.articles)
@@ -611,6 +670,24 @@ class JSONStorage:
 
             self._rebuild_indices()
             self._save_unlocked()
+
+            # Dọn audio cache các bài không còn tồn tại
+            try:
+                audio_dir = settings.DATA_FILE.parent / "audio_cache"
+                if audio_dir.exists():
+                    valid_ids = set(self._article_id_map.keys())
+                    for f in audio_dir.glob("*.mp3"):
+                        m = re.match(r"(?:art|deep_speech)_(\d+)_", f.name)
+                        if m:
+                            aid = int(m.group(1))
+                            if aid not in valid_ids:
+                                try:
+                                    f.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+            except Exception as e:
+                print(f"[cleanup] Lỗi dọn audio cache: {e}")
+
             return deleted_articles, deleted_logs
 
 # Singleton instance

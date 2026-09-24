@@ -267,12 +267,12 @@ async def get_or_create_deep_analysis(
 
 @router.post("/cleanup-read")
 def cleanup_old_read_data(
-    days: int = Query(30, ge=1, le=90),
+    days: int = Query(3, ge=1, le=90),
     storage: JSONStorage = Depends(get_storage)
 ):
     """
-    Chính sách lưu trữ: Các tin đã đọc / tin cũ chỉ lưu trữ 30 ngày.
-    Tự động dọn dẹp các bài viết cũ hơn 30 ngày nhưng BẢO TOÀN tuyệt đối các tin đã đánh dấu sao quan tâm.
+    Chính sách lưu trữ: Giới hạn lưu trữ tối đa 3 ngày (D, D-1, D-2). D-3 trở đi xóa.
+    Tự động dọn dẹp các bài viết cũ hơn 3 ngày nhưng BẢO TOÀN tuyệt đối các tin đã đánh dấu sao quan tâm.
     """
     deleted_articles, deleted_logs = storage.cleanup_old_articles(days=days)
     return {

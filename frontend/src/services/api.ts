@@ -193,7 +193,7 @@ export async function fetchDeepAnalysis(id: number, forceRefresh: boolean = fals
   return res.json();
 }
 
-export async function cleanupReadData(days: number = 30): Promise<{ status: string; deleted_articles: number; message: string }> {
+export async function cleanupReadData(days: number = 3): Promise<{ status: string; deleted_articles: number; message: string }> {
   const res = await fetch(`${API_BASE}/news/cleanup-read?days=${days}`, { method: 'POST' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
