@@ -1,17 +1,26 @@
 import asyncio
 from datetime import datetime
-from fastapi import APIRouter, Depends, BackgroundTasks
+from typing import Optional
+from fastapi import APIRouter, Depends, BackgroundTasks, Query
 
 from app.core.storage import get_storage, JSONStorage
-from app.services.sources import NEWS_SOURCES
+from app.services.sources import NEWS_SOURCES, get_sources_for_mode
 from app.services.collector import run_crawl_cycle, is_crawling_active, scheduler
 
 router = APIRouter(prefix="/api/collector", tags=["Collector"])
 
 @router.post("/trigger")
-async def trigger_collector(background_tasks: BackgroundTasks):
+async def trigger_collector(
+    background_tasks: BackgroundTasks,
+    mode: Optional[str] = Query("all", description="Chế độ quét: ai_tech | hot_vn | hot_world | trending | all")
+):
     """
-    Kích hoạt tiến trình quét tin tức ngay lập tức từ giao diện người dùng
+    Kích hoạt tiến trình quét tin tức theo chế độ được chọn:
+    - ai_tech: Tin A.I, trí tuệ nhân tạo, công nghệ (tìm 20 tin hot nhất)
+    - hot_vn: Tin tổng hợp hot Việt Nam (tìm 20 tin hot nhất)
+    - hot_world: Tin tổng hợp hot quốc tế (tìm 20 tin hot nhất)
+    - trending: Tin trending tổng hợp Việt Nam + Quốc tế (tìm 20 tin hot nhất)
+    - all: Quét toàn bộ nguồn
     """
     if is_crawling_active:
         return {
@@ -19,13 +28,25 @@ async def trigger_collector(background_tasks: BackgroundTasks):
             "message": "Tiến trình quét tin đang hoạt động, vui lòng chờ..."
         }
 
-    # Chạy background task
-    background_tasks.add_task(run_crawl_cycle)
+    sources = get_sources_for_mode(mode)
+
+    # Chạy background task với chế độ quét đã chọn
+    background_tasks.add_task(run_crawl_cycle, None, mode)
+
+    mode_titles = {
+        "ai_tech": "Tin A.I, Trí tuệ nhân tạo & Công nghệ",
+        "hot_vn": "Tin tổng hợp Hot Việt Nam",
+        "hot_world": "Tin tổng hợp Hot Quốc Tế",
+        "trending": "Tin Trending Tổng Hợp VN + Quốc Tế",
+        "all": "Toàn bộ nguồn tin"
+    }
 
     return {
         "status": "started",
-        "message": "Đã bắt đầu tiến trình quét tin tức mới!",
-        "sources_count": len(NEWS_SOURCES)
+        "mode": mode,
+        "mode_title": mode_titles.get(mode, mode),
+        "message": f"Đã bắt đầu tiến trình quét '{mode_titles.get(mode, mode)}'!",
+        "sources_count": len(sources)
     }
 
 @router.get("/status")
@@ -46,7 +67,8 @@ def get_collector_status(storage: JSONStorage = Depends(get_storage)):
             "articles_found": last_log.get("articles_found", 0),
             "articles_new": last_log.get("articles_new", 0),
             "status": last_log.get("status", "success"),
-            "error_message": last_log.get("error_message")
+            "error_message": last_log.get("error_message"),
+            "mode": last_log.get("mode", "all")
         }
 
     # Thời gian lần quét kế tiếp từ APScheduler

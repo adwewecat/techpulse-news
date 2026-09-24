@@ -1,12 +1,14 @@
 import json
 import os
 import re
+import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from app.core.config import settings
+from app.schemas.user import hash_password
 
 def parse_dt(val: Any) -> datetime:
     """Chuyển đổi chuỗi ISO hoặc datetime về datetime UTC naive"""
@@ -45,6 +47,7 @@ class JSONStorage:
         self.clusters: List[Dict[str, Any]] = []
         self.crawl_logs: List[Dict[str, Any]] = []
         self.user_reads: Dict[str, Dict[str, Any]] = {}
+        self.users: List[Dict[str, Any]] = []
         self._url_index: Dict[str, int] = {}
         self._article_id_map: Dict[int, Dict[str, Any]] = {}
         self._cluster_id_map: Dict[int, Dict[str, Any]] = {}
@@ -66,17 +69,40 @@ class JSONStorage:
                     self.clusters = data.get("clusters", [])
                     self.crawl_logs = data.get("crawl_logs", [])
                     self.user_reads = data.get("user_reads", {})
+                    self.users = data.get("users", [])
                 except Exception as e:
                     print(f"[JSONStorage] Lỗi khi đọc file {self.file_path}: {e}")
                     self.articles = []
                     self.clusters = []
                     self.crawl_logs = []
                     self.user_reads = {}
+                    self.users = []
             else:
                 self.articles = []
                 self.clusters = []
                 self.crawl_logs = []
                 self.user_reads = {}
+                self.users = []
+                self._save_unlocked()
+
+            # Tự động tạo tài khoản admin mặc định (pass: admin1230) nếu chưa có
+            if not any(u.get("username") == "admin" for u in self.users):
+                admin_user = {
+                    "id": "usr_admin",
+                    "username": "admin",
+                    "password_hash": hash_password("admin1230"),
+                    "role": "admin",
+                    "display_name": "Quản Trị Viên",
+                    "created_at": datetime.utcnow().isoformat(),
+                    "starred_ids": [],
+                    "read_ids": [],
+                    "settings": {
+                        "voice": "vi-VN-HoaiMyNeural",
+                        "playback_rate": 1.25,
+                        "autoplay": True
+                    }
+                }
+                self.users.insert(0, admin_user)
                 self._save_unlocked()
 
             self._rebuild_indices()
@@ -103,7 +129,8 @@ class JSONStorage:
             "articles": self.articles,
             "clusters": self.clusters,
             "crawl_logs": self.crawl_logs,
-            "user_reads": self.user_reads
+            "user_reads": self.user_reads,
+            "users": self.users
         }
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -218,8 +245,7 @@ class JSONStorage:
     def get_top_6h_articles(self, region: Optional[str] = None, limit: int = 30, exclude_ids: Optional[set] = None) -> List[Dict[str, Any]]:
         with self.lock:
             now_utc = datetime.utcnow()
-            cutoff_3d = now_utc - timedelta(days=3)     # 72h: D-3 trở đi xóa
-            cutoff_48h = now_utc - timedelta(hours=48)  # 48h: ranh giới giữa D-1 và D-2
+            cutoff_2d = now_utc - timedelta(days=2)     # 48h: chỉ lưu và lấy trong 2 ngày
             now_vn = now_utc + timedelta(hours=7)
             today_str = now_vn.strftime("%Y-%m-%d")
 
@@ -235,18 +261,11 @@ class JSONStorage:
                     return True
 
                 pub = parse_dt(a.get("published_at"))
-                # D-3 (> 72h): Tuyệt đối không lấy
-                if pub < cutoff_3d and not a.get("is_starred", False):
+                # Quá 2 ngày (48h): Tuyệt đối không lấy, trừ khi được đánh dấu sao
+                if pub < cutoff_2d and not a.get("is_starred", False):
                     return False
 
-                # Quá 48h (D-2: từ 48h đến 72h):
-                # "tin tức load thì cứ quá 48h là tự xóa hết tin cũ, chỉ lấy tin tức từ ngày D-2 nếu chưa đọc"
-                if pub < cutoff_48h:
-                    if exclude_ids and a.get("id") in exclude_ids:
-                        return False  # Đã đọc -> tự động loại bỏ tin cũ quá 48h
-                    return True  # Chưa đọc -> vẫn lấy để người dùng đọc kịp thời
-
-                # Trong vòng 48h (D và D-1):
+                # Đã đọc: loại bỏ nếu exclude_ids có chứa
                 if exclude_ids and a.get("id") in exclude_ids:
                     return False
                 return True
@@ -359,7 +378,7 @@ class JSONStorage:
                 a for a in self.articles
                 if a.get("category") == "special" and not a.get("is_spam", False) and is_eligible(a)
             ]
-            # Sắp xếp: thời tiết (hot_score 9999) trước, giá vàng (9998) sau
+            # Sắp xếp: điểm cao nhất trước
             special_articles.sort(key=lambda x: x.get("hot_score", 0), reverse=True)
             special_ids = {a["id"] for a in special_articles}
             mixed = [a for a in mixed if a.get("id") not in special_ids]
@@ -367,20 +386,92 @@ class JSONStorage:
             # Ghim đầu, đảm bảo tổng không vượt limit
             combined = special_articles + mixed
             
-            # Nếu chưa đủ limit và có exclude_ids (đã đọc gần hết), lấy bù các tin trong vòng 3 ngày (pub >= cutoff_3d)
+            # Nếu chưa đủ limit và có exclude_ids (đã đọc gần hết), lấy bù các tin trong vòng 2 ngày (48h)
             if len(combined) < limit and exclude_ids:
                 seen_all_ids = {a["id"] for a in combined}
                 for a in self.articles:
                     if not a.get("is_spam", False) and a.get("is_primary", True) and a.get("id") not in seen_all_ids:
                         pub = parse_dt(a.get("published_at"))
-                        # Tuyệt đối không lấy tin D-3 (> 72h)
-                        if pub >= cutoff_3d:
+                        if pub >= cutoff_2d:
                             combined.append(a)
                             seen_all_ids.add(a["id"])
                     if len(combined) >= limit:
                         break
 
             return combined[:limit]
+
+    def get_category_top20(self, mode: str = "ai_tech", limit: int = 20, exclude_ids: Optional[set] = None) -> List[Dict[str, Any]]:
+        """Lấy 20 tin nổi bật nhất theo 4 chuyên mục chọn lọc: ai_tech | hot_vn | hot_world | trending"""
+        with self.lock:
+            now_utc = datetime.utcnow()
+            cutoff_2d = now_utc - timedelta(days=2) # 48h
+            now_vn = now_utc + timedelta(hours=7)
+            today_str = now_vn.strftime("%Y-%m-%d")
+
+            def is_valid(a: Dict[str, Any]) -> bool:
+                if a.get("is_spam", False):
+                    return False
+                if a.get("category") == "special":
+                    sdate = a.get("special_date", "")
+                    if sdate and sdate != today_str:
+                        return False
+                    return True
+                pub = parse_dt(a.get("published_at"))
+                if pub < cutoff_2d and not a.get("is_starred", False):
+                    return False
+                if exclude_ids and a.get("id") in exclude_ids:
+                    return False
+                return True
+
+            clean_mode = (mode or "ai_tech").lower().strip()
+            candidates = []
+
+            for a in self.articles:
+                if not is_valid(a) or not a.get("is_primary", True):
+                    continue
+
+                if clean_mode == "ai_tech":
+                    if is_tech_article(a):
+                        candidates.append(a)
+                elif clean_mode == "hot_vn":
+                    if a.get("region") == "vietnam":
+                        candidates.append(a)
+                elif clean_mode == "hot_world":
+                    if a.get("region") == "world":
+                        candidates.append(a)
+                elif clean_mode == "trending":
+                    candidates.append(a)
+                else: # all
+                    candidates.append(a)
+
+            # Sắp xếp
+            if clean_mode == "trending":
+                candidates.sort(key=lambda x: (x.get("velocity_score", 0.0), x.get("hot_score", 0.0)), reverse=True)
+            else:
+                candidates.sort(key=lambda x: (x.get("hot_score", 0.0), parse_dt(x.get("published_at"))), reverse=True)
+
+            # Khử trùng lặp cluster sự kiện
+            seen_clusters = set()
+            deduped = []
+            for art in candidates:
+                cid = art.get("cluster_id") or f"art_{art['id']}"
+                if cid not in seen_clusters:
+                    seen_clusters.add(cid)
+                    deduped.append(art)
+                if len(deduped) >= limit:
+                    break
+
+            # Ghim bản tin đặc biệt TP.HCM lên đầu nếu phù hợp
+            special_articles = [
+                a for a in self.articles
+                if a.get("category") == "special" and not a.get("is_spam", False) and is_valid(a)
+            ]
+            if special_articles and clean_mode in ("hot_vn", "trending", "all"):
+                sp_ids = {a["id"] for a in special_articles}
+                deduped = [a for a in deduped if a.get("id") not in sp_ids]
+                deduped = special_articles + deduped
+
+            return deduped[:limit]
 
     # --- USER READ METHODS ---
 
@@ -628,10 +719,92 @@ class JSONStorage:
                 "top_sources": top_sources
             }
 
-    def cleanup_old_articles(self, days: int = 3) -> Tuple[int, int]:
+    # --- USER AUTHENTICATION & MANAGEMENT (Tối đa 5 users) ---
+
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            u_clean = username.strip().lower()
+            for u in self.users:
+                if u.get("username", "").strip().lower() == u_clean:
+                    return u
+            return None
+
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            for u in self.users:
+                if u.get("id") == user_id:
+                    return u
+            return None
+
+    def get_users_count(self) -> Dict[str, int]:
+        with self.lock:
+            return {"count": len(self.users), "max": 5}
+
+    def add_user(self, username: str, password_hash: str, display_name: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        with self.lock:
+            u_clean = username.strip().lower()
+            if len(self.users) >= 5:
+                return None, "Hệ thống đã đạt giới hạn tối đa 5 người dùng (1 admin + 4 người dùng)."
+            if self.get_user_by_username(u_clean):
+                return None, f"Tên đăng nhập '{username}' đã tồn tại, vui lòng chọn tên khác."
+
+            user_id = f"usr_{int(datetime.utcnow().timestamp())}_{secrets.token_hex(3)}"
+            user = {
+                "id": user_id,
+                "username": u_clean,
+                "password_hash": password_hash,
+                "role": "user",
+                "display_name": display_name or username,
+                "created_at": datetime.utcnow().isoformat(),
+                "starred_ids": [],
+                "read_ids": [],
+                "settings": {
+                    "voice": "vi-VN-HoaiMyNeural",
+                    "playback_rate": 1.25,
+                    "autoplay": True
+                }
+            }
+            self.users.append(user)
+            self._save_unlocked()
+            return user, None
+
+    def update_user_password(self, username: str, new_password_hash: str) -> bool:
+        with self.lock:
+            user = self.get_user_by_username(username)
+            if not user:
+                return False
+            user["password_hash"] = new_password_hash
+            user["updated_at"] = datetime.utcnow().isoformat()
+            self._save_unlocked()
+            return True
+
+    def update_user_data(
+        self,
+        username: str,
+        starred_ids: Optional[List[int]] = None,
+        read_ids: Optional[List[int]] = None,
+        settings_dict: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            user = self.get_user_by_username(username)
+            if not user:
+                return None
+            if starred_ids is not None:
+                user["starred_ids"] = list(set(starred_ids))
+            if read_ids is not None:
+                user["read_ids"] = list(set(read_ids))
+            if settings_dict is not None:
+                curr_s = user.setdefault("settings", {})
+                curr_s.update(settings_dict)
+            user["updated_at"] = datetime.utcnow().isoformat()
+            self._save_unlocked()
+            return user
+
+    def cleanup_old_articles(self, days: int = 2) -> Tuple[int, int]:
+        """Dọn dẹp bài viết cũ hơn `days` ngày (mặc định 2 ngày = 48h để tránh phình dữ liệu)"""
         with self.lock:
             now = datetime.utcnow()
-            cutoff_3d = now - timedelta(days=days)
+            cutoff_2d = now - timedelta(days=days)
             initial_art_count = len(self.articles)
             initial_log_count = len(self.crawl_logs)
 
@@ -641,8 +814,8 @@ class JSONStorage:
             kept_articles = []
             for a in self.articles:
                 pub = parse_dt(a.get("published_at"))
-                # 1. Xóa D-3 (> 72h)
-                if pub < cutoff_3d and not a.get("is_starred", False):
+                # 1. Xóa bài cũ hơn 2 ngày (48h), ngoại trừ bài đã đánh dấu sao quan tâm
+                if pub < cutoff_2d and not a.get("is_starred", False):
                     continue
                 # 2. Xóa các tin đặc biệt cũ (ngày trước)
                 if a.get("category") == "special" or a.get("special_type"):
@@ -652,17 +825,17 @@ class JSONStorage:
 
             self.articles = kept_articles
 
-            # Xóa crawl log cũ > 3 ngày
+            # Xóa crawl log cũ > 2 ngày
             self.crawl_logs = [
                 l for l in self.crawl_logs
-                if parse_dt(l.get("started_at")) >= cutoff_3d
+                if parse_dt(l.get("started_at")) >= cutoff_2d
             ]
 
             # Dọn cluster không còn bài viết
             remaining_cids = {a.get("cluster_id") for a in self.articles if a.get("cluster_id")}
             self.clusters = [
                 c for c in self.clusters
-                if c.get("id") in remaining_cids or parse_dt(c.get("last_seen_at")) >= cutoff_3d
+                if c.get("id") in remaining_cids or parse_dt(c.get("last_seen_at")) >= cutoff_2d
             ]
 
             deleted_articles = initial_art_count - len(self.articles)
@@ -695,3 +868,4 @@ storage = JSONStorage()
 
 def get_storage() -> JSONStorage:
     return storage
+

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.storage import storage
-from app.api import news, collector, stats, tts
+from app.api import news, collector, stats, tts, auth
 from app.services.collector import start_scheduler, run_crawl_cycle
 
 logger = logging.getLogger("app")
@@ -21,10 +21,10 @@ async def lifespan(app: FastAPI):
         count = len(storage.articles)
         logger.info(f"Đã nạp thành công {count} bài viết từ JSON Storage!")
 
-        # 1. Tự động dọn dẹp các tin quá 3 ngày (D-3) và file audio cache thừa ngay khi khởi động
-        del_arts, _ = storage.cleanup_old_articles(days=3)
+        # 1. Tự động dọn dẹp các tin quá 2 ngày (48h) và file audio cache thừa ngay khi khởi động
+        del_arts, _ = storage.cleanup_old_articles(days=2)
         if del_arts > 0:
-            logger.info(f"Đã dọn dẹp {del_arts} bài viết cũ quá 3 ngày (D-3) và dọn audio cache.")
+            logger.info(f"Đã dọn dẹp {del_arts} bài viết cũ quá 2 ngày (48h) và dọn audio cache.")
 
         # 2. Cập nhật ngay tin đặc biệt theo giờ: Thời tiết TP.HCM (Hôm nay D & Ngày mai D+1) và Giá vàng Mi Hồng
         from app.services.special_feeds import upsert_special_feeds
@@ -84,6 +84,7 @@ app.include_router(news.router)
 app.include_router(collector.router)
 app.include_router(stats.router)
 app.include_router(tts.router)
+app.include_router(auth.router)
 
 @app.get("/")
 def root():

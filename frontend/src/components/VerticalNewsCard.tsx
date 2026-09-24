@@ -104,12 +104,14 @@ export const VerticalNewsCard: React.FC<VerticalNewsCardProps> = ({
             fontWeight: 800,
             padding: '0.2rem 0.55rem',
             borderRadius: '6px',
-            background: rank <= 3
+            background: article.category === 'special'
+              ? 'linear-gradient(135deg, #f59e0b, #d97706)'
+              : rank <= 3
               ? 'linear-gradient(135deg, #ff5722, #ff8c00)'
               : 'rgba(255, 255, 255, 0.1)',
             color: '#fff',
           }}>
-            #{rank}
+            {article.category === 'special' ? '🌤️ ĐIỂM TIN' : `#${rank}`}
           </span>
 
           {/* Source Name */}
@@ -137,7 +139,22 @@ export const VerticalNewsCard: React.FC<VerticalNewsCardProps> = ({
 
         {/* Badges & Hot Score */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          {article.hot_score > 0 && (
+          {article.category === 'special' ? (
+            <span style={{
+              fontSize: '0.68rem',
+              padding: '0.15rem 0.5rem',
+              borderRadius: '6px',
+              background: 'rgba(234, 179, 8, 0.2)',
+              color: '#fde047',
+              border: '1px solid rgba(234, 179, 8, 0.4)',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.25rem',
+            }}>
+              🌤️ TP.HCM & VÀNG
+            </span>
+          ) : article.hot_score > 0 ? (
             <span style={{
               display: 'flex',
               alignItems: 'center',
@@ -153,9 +170,9 @@ export const VerticalNewsCard: React.FC<VerticalNewsCardProps> = ({
               <Flame size={12} />
               {article.hot_score}đ
             </span>
-          )}
+          ) : null}
 
-          {article.badge === 'trending' && (
+          {article.badge === 'trending' && article.category !== 'special' && (
             <span className="badge-trending" style={{
               fontSize: '0.68rem',
               padding: '0.15rem 0.5rem',

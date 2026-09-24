@@ -86,6 +86,30 @@ def get_top_6h_news(
     results = storage.get_top_6h_articles(region=region, limit=limit, exclude_ids=exclude_ids)
     return [enrich_article_out(storage, art) for art in results]
 
+@router.get("/top20", response_model=List[ArticleOut])
+def get_top20_by_category(
+    mode: str = Query("ai_tech", description="Chuyên mục: ai_tech | hot_vn | hot_world | trending | all"),
+    limit: int = Query(20, ge=1, le=50),
+    user_id: Optional[str] = Query(None, description="Mã người dùng/khách để loại trừ tin đã đọc"),
+    exclude_read: bool = Query(True, description="Loại trừ tin đã đọc"),
+    storage: JSONStorage = Depends(get_storage)
+):
+    """
+    Lấy 20 tin nổi bật nhất theo 4 chuyên mục chọn lọc khi quét:
+    + ai_tech: Tin A.I, trí tuệ nhân tạo, công nghệ (tìm 20 tin hot nhất)
+    + hot_vn: Tin tổng hợp hot Việt Nam (tìm 20 tin hot nhất)
+    + hot_world: Tin tổng hợp hot quốc tế (tìm 20 tin hot nhất)
+    + trending: Tin trending tổng hợp Việt Nam + Quốc tế (tìm 20 tin hot nhất)
+    """
+    exclude_ids = None
+    if user_id and exclude_read:
+        read_list = storage.get_user_read_ids(user_id)
+        if read_list:
+            exclude_ids = set(read_list)
+
+    results = storage.get_category_top20(mode=mode, limit=limit, exclude_ids=exclude_ids)
+    return [enrich_article_out(storage, art) for art in results]
+
 @router.post("/user/read")
 def mark_user_read_endpoint(req: UserReadRequest, storage: JSONStorage = Depends(get_storage)):
     """Đánh dấu một bài viết là đã đọc cho thiết bị/người dùng ẩn danh"""

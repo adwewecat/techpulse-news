@@ -57,19 +57,29 @@ DEFAULT_VOICE = "vi-VN-HoaiMyNeural"
 # Khóa chống trùng lặp request đang tổng hợp âm thanh (In-flight deduplication)
 IN_FLIGHT_SYNTHESIS: Dict[str, asyncio.Future] = {}
 
-VIETNAMESE_DIACRITICS = set("àáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ")
+def clean_script_for_tts(script: str) -> str:
+    """Lọc sạch mọi URL, liên kết web, nhãn rác khỏi văn bản trước khi đọc"""
+    if not script:
+        return ""
+    # 1. Bỏ toàn bộ link/URL (http://..., https://..., www...., .com/...)
+    script = re.sub(r'https?://\S+|www\.\S+', '', script)
+    # 2. Bỏ các nhãn rác
+    script = re.sub(r'\b(url bài viết|url bình luận|xem chi tiết tại|link bài|nguồn bài|theo dõi tin)\s*:\s*', '', script, flags=re.IGNORECASE)
+    # 3. Bỏ các đuôi định dạng tệp .html, .php, .pdf,...
+    script = re.sub(r'\b\w+\.(?:html|php|asp|jsp|pdf)\b', '', script, flags=re.IGNORECASE)
+    # 4. Chuẩn hóa khoảng trắng
+    script = re.sub(r'\s+', ' ', script).strip()
+    return script
 
-VI_STOPWORDS = {
-    'và', 'của', 'là', 'các', 'những', 'được', 'trong', 'người', 'ngày', 'cho',
-    'với', 'có', 'về', 'đã', 'đang', 'sẽ', 'tại', 'theo', 'nhiều', 'này',
-    'đến', 'từ', 'không', 'một', 'ra', 'khi', 'sau', 'lại', 'làm', 'như', 'năm'
-}
-
-EN_STOPWORDS = {
+COMMON_EN_WORDS = {
     'the', 'of', 'and', 'to', 'in', 'is', 'that', 'for', 'it', 'as', 'was',
     'with', 'on', 'at', 'by', 'from', 'this', 'are', 'be', 'has', 'have',
     'had', 'an', 'which', 'will', 'about', 'can', 'their', 'more', 'how', 'why',
-    'after', 'years', 'space', 'border', 'new', 'what', 'who', 'where'
+    'after', 'years', 'space', 'border', 'new', 'what', 'who', 'where', 'when',
+    'said', 'all', 'into', 'would', 'could', 'were', 'over', 'its', 'such', 'also',
+    'they', 'them', 'first', 'other', 'most', 'been', 'than', 'some', 'time', 'announced',
+    'launches', 'unveils', 'feature', 'features', 'released', 'updates', 'report', 'claims',
+    'court', 'police', 'company', 'startup', 'model', 'models', 'billion', 'million'
 }
 
 def needs_vi_translation(text: str) -> bool:
@@ -77,31 +87,30 @@ def needs_vi_translation(text: str) -> bool:
     if not text or not text.strip():
         return False
 
-    clean_text = text.strip()
+    clean_text = clean_script_for_tts(text)
+    if not clean_text:
+        return False
+
     vi_chars = sum(1 for c in clean_text.lower() if c in VIETNAMESE_DIACRITICS)
     words = [w.lower() for w in re.findall(r'[a-zA-Zàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ]+', clean_text)]
     if not words:
         return False
 
+    en_matches = sum(1 for w in words if w in COMMON_EN_WORDS)
     vi_matches = sum(1 for w in words if w in VI_STOPWORDS)
-    en_matches = sum(1 for w in words if w in EN_STOPWORDS)
 
-    # 1. Có từ nối tiếng Anh rõ rệt và không có từ nối tiếng Việt
-    if en_matches >= 1 and vi_matches == 0:
+    # 1. Có từ tiếng Anh phổ biến rõ rệt
+    if en_matches >= 1 and (en_matches >= vi_matches or vi_matches == 0):
         return True
-    if en_matches > vi_matches:
+    if en_matches >= 2:
         return True
 
-    # 2. Hoàn toàn không có ký tự dấu tiếng Việt nào và có >= 2 từ
+    # 2. Hoàn toàn không có dấu tiếng Việt nào và có >= 2 từ
     if vi_chars == 0 and len(words) >= 2:
         return True
 
-    # 3. Mật độ dấu tiếng Việt quá thấp (< 3.5%) trong văn bản dài > 25 ký tự mà không có từ nối tiếng Việt
-    if len(clean_text) > 25 and (vi_chars / len(clean_text)) < 0.035 and vi_matches == 0:
-        return True
-
-    # 4. Có từ 1 từ tiếng Anh ngắn không dấu
-    if vi_chars == 0 and len(clean_text) >= 3:
+    # 3. Tỷ lệ ký tự dấu tiếng Việt quá thấp (< 2.5%) trong câu dài mà có từ tiếng Anh
+    if len(clean_text) > 25 and (vi_chars / len(clean_text)) < 0.025 and en_matches > 0:
         return True
 
     return False
@@ -119,9 +128,12 @@ async def translate_to_vietnamese(text: str, client: httpx.AsyncClient) -> str:
     if not text or not text.strip():
         return text
 
-    # Nếu văn bản đã chắc chắn là tiếng Việt chuẩn và không cần dịch
-    if not needs_vi_translation(text):
-        return text
+    clean_text = clean_script_for_tts(text)
+    if not clean_text:
+        return ""
+
+    if not needs_vi_translation(clean_text):
+        return clean_text
 
     try:
         url = "https://translate.googleapis.com/translate_a/single"
@@ -130,22 +142,17 @@ async def translate_to_vietnamese(text: str, client: httpx.AsyncClient) -> str:
             "sl": "auto",
             "tl": "vi",
             "dt": "t",
-            "q": text[:3500]
+            "q": clean_text[:3500]
         }
         res = await client.get(url, params=params, headers=HEADERS, timeout=8.0)
         if res.status_code == 200:
             data = res.json()
-            # Kiểm tra ngôn ngữ phát hiện được từ Google
-            detected_lang = data[2] if len(data) > 2 and isinstance(data[2], str) else ""
-            if detected_lang == "vi":
-                return text
-
             translated = "".join([part[0] for part in data[0] if part and len(part) > 0 and part[0]])
             if translated and translated.strip():
-                return translated.strip()
+                return clean_script_for_tts(translated.strip())
     except Exception as e:
         logger.warning(f"Error translating text: {e}")
-    return text
+    return clean_text
 
 def split_text_for_tts(text: str, max_length: int = 170) -> List[str]:
     """Tách văn bản thành các đoạn ngắn tự nhiên để gửi tới TTS API (cho Google TTS fallback)"""
@@ -330,6 +337,126 @@ async def preview_pronunciation(req: PreviewPronunciationRequest):
             }
         )
 
+async def synthesize_and_cache_article(
+    article_id: int,
+    rank: Optional[int] = None,
+    voice: Optional[str] = None,
+    storage: Optional[JSONStorage] = None,
+    client: Optional[httpx.AsyncClient] = None
+) -> Optional[bytes]:
+    """
+    Hàm lõi sinh và lưu trữ file âm thanh MP3 chuẩn:
+    - Loại bỏ sạch URL và nhãn rác
+    - Đảm bảo dịch 100% tiếng Việt
+    - Ghi vào RAM và Disk Cache
+    - Dùng chung cho cả request trực tiếp và background worker tạo trước âm thanh
+    """
+    st = storage or get_storage()
+    selected_voice = voice if voice in {v["id"] for v in VOICE_OPTIONS} else DEFAULT_VOICE
+    cache_key = f"art_{article_id}_r_{rank}_{selected_voice}"
+
+    # 1. Kiểm tra RAM cache
+    if cache_key in AUDIO_CACHE and len(AUDIO_CACHE[cache_key]) > 1000:
+        return AUDIO_CACHE[cache_key]
+
+    # 2. Kiểm tra Disk Cache
+    disk_file = AUDIO_CACHE_DIR / f"{cache_key}.mp3"
+    if disk_file.exists():
+        try:
+            cached_bytes = disk_file.read_bytes()
+            if len(cached_bytes) > 1000:
+                AUDIO_CACHE[cache_key] = cached_bytes
+                return cached_bytes
+            else:
+                disk_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    art = st.get_article_by_id(article_id)
+    if not art:
+        return None
+
+    # Lấy nội dung tóm tắt đầy đủ, loại bỏ liên kết web
+    summary_text = (art.get("summary_short") or "").strip()
+    if not summary_text or summary_text.rstrip().endswith(("...", "…", "..")):
+        content_raw = (art.get("content_raw") or "").strip()
+        if content_raw and len(content_raw) > len(summary_text):
+            raw_sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', content_raw) if len(s.strip()) > 25 and not s.strip().endswith(("...", "…", ".."))]
+            if raw_sents:
+                summary_text = " ".join(raw_sents[:3])
+        if summary_text.rstrip().endswith(("...", "…", "..")):
+            parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', summary_text) if len(p.strip()) > 15]
+            complete_parts = [p for p in parts if not p.rstrip().endswith(("...", "…", ".."))]
+            summary_text = " ".join(complete_parts) if complete_parts else re.sub(r'[\s.…]+$', '', summary_text) + "."
+
+    if not summary_text:
+        summary_text = art.get("title", "")
+
+    should_close_client = False
+    if client is None:
+        client = httpx.AsyncClient(follow_redirects=True, timeout=12.0)
+        should_close_client = True
+
+    try:
+        title_raw = clean_script_for_tts(art.get("title", ""))
+        summary_clean = clean_script_for_tts(summary_text)
+
+        title_vi = await translate_to_vietnamese(title_raw, client)
+        summary_vi = await translate_to_vietnamese(summary_clean, client)
+
+        # Cập nhật bản dịch tiếng Việt vào kho storage nếu trước đó lưu tiếng Anh
+        updates = {}
+        if title_vi and title_vi != title_raw and needs_vi_translation(title_raw):
+            updates["title"] = title_vi
+        if summary_vi and summary_vi != summary_clean and needs_vi_translation(summary_clean):
+            updates["summary_short"] = summary_vi
+        if updates:
+            st.update_article(art["id"], updates)
+
+        title_final = title_vi.strip().rstrip(".,;:!?")
+        summary_final = summary_vi.strip()
+        summary_final = re.sub(r'^(tóm tắt|tóm tắt bài viết|tóm tắt nội dung)[\s:]+', '', summary_final, flags=re.IGNORECASE).strip()
+        summary_final = re.sub(r'^(nguồn|nguồn báo)[\s:]+[^,.]+[.,\s]+', '', summary_final, flags=re.IGNORECASE).strip()
+
+        sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', summary_final) if len(s.strip()) > 15]
+        if len(sents) > 3:
+            summary_final = " ".join(sents[:3])
+
+        if rank:
+            if summary_final and summary_final != title_final:
+                full_script = f"Tin số {rank}: {title_final}. {summary_final}"
+            else:
+                full_script = f"Tin số {rank}: {title_final}."
+        else:
+            if summary_final and summary_final != title_final:
+                full_script = f"{title_final}. {summary_final}"
+            else:
+                full_script = f"{title_final}."
+
+        # Lọc sạch URL lần cuối để tuyệt đối không đọc link web
+        full_script = clean_script_for_tts(full_script)
+        if needs_vi_translation(full_script):
+            full_script = await translate_to_vietnamese(full_script, client)
+
+        # Áp dụng từ điển phát âm
+        from app.services.pronunciation import apply_pronunciation
+        full_script = apply_pronunciation(full_script)
+
+        final_bytes = await synthesize_speech(full_script, selected_voice, client)
+        if final_bytes and len(final_bytes) >= 300:
+            if len(AUDIO_CACHE) > 300:
+                AUDIO_CACHE.clear()
+            AUDIO_CACHE[cache_key] = final_bytes
+            try:
+                disk_file.write_bytes(final_bytes)
+            except Exception:
+                pass
+            return final_bytes
+        return None
+    finally:
+        if should_close_client:
+            await client.aclose()
+
 @router.get("/article/{article_id}")
 async def get_article_speech(
     article_id: int,
@@ -339,17 +466,16 @@ async def get_article_speech(
 ):
     """
     Sinh file âm thanh MP3 giọng Tiếng Việt tự nhiên 100%:
-    - Đọc: Tin số X: Tiêu đề, Nội dung tóm tắt đầy đủ
-    - Tự động dịch sang Tiếng Việt nếu là tin quốc tế
+    - Đọc: Tin số X: Tiêu đề, Nội dung tóm tắt đầy đủ (Không đọc URL rác)
+    - Tự động dịch sang Tiếng Việt 100% nếu là tin quốc tế
     - Tùy chọn giọng đọc Nam / Nữ theo sở thích
     - Trả về header Content-Length chuẩn để trình duyệt xác định đúng độ dài & kết thúc
     - Lưu RAM & Disk cache phản hồi tức thì (< 0.01s)
     """
     valid_voice_ids = {v["id"] for v in VOICE_OPTIONS}
     selected_voice = voice if voice in valid_voice_ids else DEFAULT_VOICE
-
     cache_key = f"art_{article_id}_r_{rank}_{selected_voice}"
-    
+
     # 1. Kiểm tra RAM cache
     if cache_key in AUDIO_CACHE and len(AUDIO_CACHE[cache_key]) > 1000:
         cached_data = AUDIO_CACHE[cache_key]
@@ -382,13 +508,11 @@ async def get_article_speech(
                     }
                 )
             else:
-                # File rác hoặc bị cắt cụt do lỗi trước đó, xóa bỏ để tạo mới
                 disk_file.unlink(missing_ok=True)
         except Exception:
             pass
 
     # 3. Chống request trùng lặp (In-flight request deduplication)
-    # Nếu đang có một request khác tạo cùng audio này (ví dụ preload + user click), đợi request đó hoàn thành
     if cache_key in IN_FLIGHT_SYNTHESIS:
         try:
             final_bytes = await IN_FLIGHT_SYNTHESIS[cache_key]
@@ -410,104 +534,33 @@ async def get_article_speech(
     if not art:
         raise HTTPException(status_code=404, detail="Không tìm thấy bài viết")
 
-    # 4. Lấy nội dung tóm tắt sẵn có trong JSON storage (đảm bảo câu hoàn chỉnh, không cụt ngủn)
-    summary_text = (art.get("summary_short") or "").strip()
-    
-    if not summary_text or summary_text.rstrip().endswith(("...", "…", "..")):
-        content_raw = (art.get("content_raw") or "").strip()
-        if content_raw and len(content_raw) > len(summary_text):
-            raw_sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', content_raw) if len(s.strip()) > 25 and not s.strip().endswith(("...", "…", ".."))]
-            if raw_sents:
-                summary_text = " ".join(raw_sents[:3])
-        
-        if summary_text.rstrip().endswith(("...", "…", "..")):
-            parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', summary_text) if len(p.strip()) > 15]
-            complete_parts = [p for p in parts if not p.rstrip().endswith(("...", "…", ".."))]
-            if complete_parts:
-                summary_text = " ".join(complete_parts)
-            else:
-                summary_text = re.sub(r'[\s.…]+$', '', summary_text) + "."
-    
-    if not summary_text:
-        summary_text = art.get("title", "")
-
-    # Tạo Future để chia sẻ kết quả với các request đồng thời khác
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     IN_FLIGHT_SYNTHESIS[cache_key] = future
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as client:
-            # Nếu là tin quốc tế hoặc có từ tiếng Anh, tự động dịch sang Tiếng Việt
-            title_raw = art.get("title", "")
-            title_vi = await translate_to_vietnamese(title_raw, client)
-            summary_vi = await translate_to_vietnamese(summary_text, client)
+        final_bytes = await synthesize_and_cache_article(
+            article_id=article_id,
+            rank=rank,
+            voice=selected_voice,
+            storage=storage
+        )
+        if not final_bytes or len(final_bytes) < 300:
+            raise HTTPException(status_code=500, detail="Không thể tạo âm thanh Tiếng Việt")
 
-            # Tự động cập nhật bản dịch tiếng Việt vào kho storage nếu trước đó lưu bằng tiếng Anh
-            updates = {}
-            if title_vi and title_vi != title_raw and needs_vi_translation(title_raw):
-                updates["title"] = title_vi
-            if summary_vi and summary_vi != summary_text and needs_vi_translation(summary_text):
-                updates["summary_short"] = summary_vi
-            if updates:
-                storage.update_article(art["id"], updates)
+        if not future.done():
+            future.set_result(final_bytes)
 
-            title_clean = title_vi.strip().rstrip(".,;:!?")
-            summary_clean = summary_vi.strip()
-
-            summary_clean = re.sub(r'^(tóm tắt|tóm tắt bài viết|tóm tắt nội dung)[\s:]+', '', summary_clean, flags=re.IGNORECASE).strip()
-            summary_clean = re.sub(r'^(nguồn|nguồn báo)[\s:]+[^,.]+[.,\s]+', '', summary_clean, flags=re.IGNORECASE).strip()
-
-            sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', summary_clean) if len(s.strip()) > 15]
-            if len(sents) > 3:
-                summary_clean = " ".join(sents[:3])
-
-            if rank:
-                if summary_clean and summary_clean != title_clean:
-                    full_script = f"Tin số {rank}: {title_clean}, {summary_clean}"
-                else:
-                    full_script = f"Tin số {rank}: {title_clean}."
-            else:
-                if summary_clean and summary_clean != title_clean:
-                    full_script = f"{title_clean}, {summary_clean}"
-                else:
-                    full_script = f"{title_clean}."
-
-            # KIỂM TRA LẠI: Nếu script vẫn còn câu tiếng Anh, dịch toàn bộ sang tiếng Việt
-            if needs_vi_translation(full_script):
-                full_script = await translate_to_vietnamese(full_script, client)
-
-            # Áp dụng từ điển cấu hình phát âm theo người dùng (VD: OpenAI -> ô pần ây ai)
-            from app.services.pronunciation import apply_pronunciation
-            full_script = apply_pronunciation(full_script)
-
-            final_bytes = await synthesize_speech(full_script, selected_voice, client)
-
-            if not final_bytes or len(final_bytes) < 300:
-                raise HTTPException(status_code=500, detail="Không thể tạo âm thanh Tiếng Việt")
-
-            # Lưu RAM và Disk Cache
-            if len(AUDIO_CACHE) > 300:
-                AUDIO_CACHE.clear()
-            AUDIO_CACHE[cache_key] = final_bytes
-            try:
-                disk_file.write_bytes(final_bytes)
-            except Exception:
-                pass
-
-            if not future.done():
-                future.set_result(final_bytes)
-
-            return Response(
-                content=final_bytes,
-                media_type="audio/mpeg",
-                headers={
-                    "Content-Type": "audio/mpeg",
-                    "Content-Length": str(len(final_bytes)),
-                    "Accept-Ranges": "bytes",
-                    "Cache-Control": "public, max-age=86400"
-                }
-            )
+        return Response(
+            content=final_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Type": "audio/mpeg",
+                "Content-Length": str(len(final_bytes)),
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "public, max-age=86400"
+            }
+        )
     except Exception as e:
         if not future.done():
             future.set_exception(e)

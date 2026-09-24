@@ -9,6 +9,14 @@ from app.services.ai_processor import gemini_client, clean_sentence_dots, split_
 
 logger = logging.getLogger("tech_enricher")
 
+def clean_no_url(text: str) -> str:
+    """Lọc sạch mọi URL hoặc link rác khỏi văn bản"""
+    if not text:
+        return ""
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    text = re.sub(r'\b(url bài viết|url bình luận|bình luận|nguồn bài)\s*:\s*', '', text, flags=re.IGNORECASE)
+    return text.strip()
+
 def gather_tech_related_sources(storage: JSONStorage, article: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Thu thập tất cả các bài viết cùng sự kiện hoặc cùng chủ đề công nghệ từ các nguồn khác"""
     art_id = article.get("id")
@@ -25,7 +33,7 @@ def gather_tech_related_sources(storage: JSONStorage, article: Dict[str, Any]) -
                 seen_ids.add(r_id)
                 related.append(rel)
 
-    # 2. Tìm thêm bài công nghệ có cùng từ khóa chủ đạo (Apple, iPhone, Nvidia, OpenAI, AI, Samsung, Chip, Viettel,...)
+    # 2. Tìm thêm bài công nghệ có cùng từ khóa chủ đạo
     title = article.get("title", "")
     key_terms = re.findall(r'\b[A-Za-z0-9\-]{3,}\b', title)
     tech_keywords = [w.lower() for w in key_terms if w.lower() not in ["cho", "trong", "tren", "nhung", "theo", "voi", "viet", "nam", "the", "and", "for", "with"]]
@@ -36,7 +44,6 @@ def gather_tech_related_sources(storage: JSONStorage, article: Dict[str, Any]) -
                 if a.get("id") in seen_ids or not is_tech_article(a):
                     continue
                 a_title = a.get("title", "").lower()
-                # Kiểm tra trùng khớp từ khóa
                 matches = sum(1 for kw in tech_keywords if kw in a_title)
                 if matches >= 2 or (len(tech_keywords) == 1 and tech_keywords[0] in a_title):
                     seen_ids.add(a["id"])
@@ -46,94 +53,68 @@ def gather_tech_related_sources(storage: JSONStorage, article: Dict[str, Any]) -
 
     return related
 
-def synthesize_tech_explanation_nlp(article: Dict[str, Any], related: List[Dict[str, Any]]) -> str:
-    """Tổng hợp phân tích sâu đa nguồn bằng NLP nội bộ khi không dùng LLM"""
-    title = article.get("title", "")
-    primary_text = article.get("content_raw") or article.get("summary_short") or title
+async def synthesize_tech_explanation_nlp(
+    article: Dict[str, Any], 
+    related: List[Dict[str, Any]], 
+    client: Optional[httpx.AsyncClient] = None
+) -> str:
+    """Tổng hợp phân tích sâu đa nguồn bằng NLP nội bộ, đảm bảo 100% tiếng Việt chuẩn"""
+    from app.api.tts import translate_to_vietnamese, needs_vi_translation
+
+    title = clean_no_url(article.get("title", ""))
+    primary_text = clean_no_url(article.get("content_raw") or article.get("summary_short") or title)
     primary_sents = split_sentences(primary_text)
     
     selected_sents = []
-    # Lấy 1-2 câu cốt lõi từ bài chính
     if primary_sents:
         selected_sents.extend(primary_sents[:2])
     else:
         selected_sents.append(title)
 
-    # Lấy thông tin bổ sung từ các nguồn đối chiếu
-    for rel in related[:2]:
-        r_text = rel.get("content_raw") or rel.get("summary_short") or rel.get("title", "")
-        r_sents = split_sentences(r_text)
-        for s in r_sents:
-            # Chọn câu chứa thông tin kỹ thuật, số liệu hoặc đánh giá mới
-            if len(s) > 35 and not any(s in ex or ex in s for ex in selected_sents):
-                selected_sents.append(f"Theo {rel.get('source_name', 'nguồn đối chiếu')}, {s[0].lower() + s[1:] if s else s}")
-                break
-        if len(selected_sents) >= 4:
-            break
+    should_close_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=8.0)
+        should_close_client = True
 
-    # Đảm bảo các câu sạch sẽ, tròn câu
-    cleaned = [clean_sentence_dots(s) for s in selected_sents]
+    try:
+        # Lấy thông tin bổ sung từ các nguồn đối chiếu
+        for rel in related[:2]:
+            r_text = clean_no_url(rel.get("summary_short") or rel.get("title", ""))
+            r_sents = split_sentences(r_text)
+            for s in r_sents:
+                s_clean = clean_no_url(s)
+                if len(s_clean) > 35 and not any(s_clean in ex or ex in s_clean for ex in selected_sents):
+                    # BẮT BUỘC: Dịch sang tiếng Việt nếu câu đối chiếu chứa tiếng Anh
+                    if needs_vi_translation(s_clean):
+                        s_clean = await translate_to_vietnamese(s_clean, client)
+                    if s_clean and not needs_vi_translation(s_clean):
+                        src_name = rel.get('source_name', 'nguồn đối chiếu')
+                        selected_sents.append(f"Theo {src_name}, {s_clean[0].lower() + s_clean[1:] if s_clean else s_clean}")
+                        break
+            if len(selected_sents) >= 4:
+                break
+    finally:
+        if should_close_client:
+            await client.aclose()
+
+    cleaned = [clean_sentence_dots(s) for s in selected_sents if len(s.strip()) > 15]
     return " ".join(cleaned)
 
-def synthesize_tech_explanation_gemini(article: Dict[str, Any], related: List[Dict[str, Any]]) -> Optional[str]:
-    """Sử dụng Gemini để phân tích sâu, đối chiếu đa nguồn và giải thích cặn kẽ bản chất công nghệ"""
-    if not gemini_client:
-        return None
-
-    title = article.get("title", "")
-    main_body = (article.get("content_raw") or article.get("summary_short") or title)[:1800]
-    
-    related_blocks = []
-    for idx, r in enumerate(related[:3], 1):
-        r_text = (r.get("content_raw") or r.get("summary_short") or r.get("title", ""))[:600]
-        related_blocks.append(f"[{idx}] Nguồn {r.get('source_name')}: {r.get('title')}\nNội dung: {r_text}")
-    
-    related_context = "\n\n".join(related_blocks) if related_blocks else "Không có nguồn đối chiếu khác."
-
-    prompt = f"""Bạn là một chuyên gia phân tích công nghệ cao cấp. Hãy đọc tin tức công nghệ sau cùng các nguồn tin đối chiếu để viết một bản TÓM TẮT PHÂN TÍCH SÂU ĐA NGUỒN (khoảng 3 đến 4 câu văn hoàn chỉnh, mạch lạc bằng tiếng Việt):
-1. Nêu rõ bản chất công nghệ/sản phẩm mới vừa được công bố hoặc diễn ra.
-2. Giải thích sâu: Công nghệ này hoạt động ra sao, có đột phá gì về thông số/kỹ thuật so với trước đây.
-3. Đối chiếu và tổng hợp thêm chi tiết từ các nguồn báo khác (nêu rõ góc nhìn nếu có).
-4. Tác động thực tế và ý nghĩa đối với thị trường hoặc người dùng.
-
-[BÀI VIẾT CHÍNH]:
-Tiêu đề: {title}
-Nguồn: {article.get('source_name')}
-Nội dung: {main_body}
-
-[CÁC NGUỒN ĐỐI CHIẾU]:
-{related_context}
-
-Yêu cầu:
-- Trả về trực tiếp đoạn văn 3-4 câu tiếng Việt tự nhiên, không chèn tiêu đề [TÓM TẮT], không dùng gạch đầu dòng, không cắt cụt bằng dấu ba chấm.
-"""
-    try:
-        response = gemini_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt,
-        )
-        res_text = (response.text or "").strip()
-        if res_text and len(res_text) > 80:
-            return clean_sentence_dots(res_text)
-    except Exception as e:
-        logger.warning(f"Lỗi gọi Gemini cho Tech Deep Enrichment: {e}")
-
-    return None
-
-def enrich_tech_article_deeply(article: Dict[str, Any], storage: Optional[JSONStorage] = None, use_gemini: bool = False) -> Dict[str, Any]:
-    """Phân tích sâu và tổng hợp đa nguồn cho một bài viết công nghệ"""
+async def enrich_tech_article_deeply(
+    article: Dict[str, Any], 
+    storage: Optional[JSONStorage] = None, 
+    client: Optional[httpx.AsyncClient] = None
+) -> Dict[str, Any]:
+    """Phân tích sâu và tổng hợp đa nguồn cho bài viết công nghệ, đảm bảo 100% tiếng Việt"""
     st = storage or default_storage
     if not is_tech_article(article):
         return article
 
     related = gather_tech_related_sources(st, article)
-    
-    enriched_summary = None
-    if use_gemini:
-        enriched_summary = synthesize_tech_explanation_gemini(article, related)
-    
-    if not enriched_summary:
-        enriched_summary = synthesize_tech_explanation_nlp(article, related)
+    if not related:
+        return article
+
+    enriched_summary = await synthesize_tech_explanation_nlp(article, related, client)
 
     if enriched_summary and len(enriched_summary) > len(article.get("summary_short", "")):
         sents = split_sentences(enriched_summary)

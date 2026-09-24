@@ -1,18 +1,19 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
-  fetchTop6hNews, fetchCrawlStatus, fetchStats, 
+  fetchTop6hNews, fetchTop20News, fetchCrawlStatus, fetchStats, 
   recordArticleClick, triggerCrawlNow, toggleStarArticle, cleanupReadData,
   getOrCreateUserId, markUserReadApi, markUserUnreadApi, syncUserReadsApi,
-  clearUserReadsApi, fetchUserReadArticles
+  clearUserReadsApi, fetchUserReadArticles, syncUserDataApi
 } from './services/api';
 import { VietnameseTTS } from './services/tts';
-import type { Article, CrawlStatus, StatsOverview } from './types/news';
+import type { Article, CrawlStatus, StatsOverview, CrawlMode, UserProfile } from './types/news';
 import { Header } from './components/Header';
 import { AudioPlayerBar, VOICE_OPTIONS } from './components/AudioPlayerBar';
 import { VerticalNewsCard } from './components/VerticalNewsCard';
 import { QuickReaderModal } from './components/QuickReaderModal';
 import { DeepAnalysisModal } from './components/DeepAnalysisModal';
 import { PronunciationModal } from './components/PronunciationModal';
+import { AuthModal } from './components/AuthModal';
 import { 
   Flame, CheckCheck, Sparkles, Star,
   RotateCcw, AlertCircle, CheckCircle2, Cpu
@@ -20,16 +21,38 @@ import {
 
 const STORAGE_READ_ITEMS_KEY = 'tech_pulse_read_items_v2';
 const STORAGE_STARRED_KEY = 'tech_pulse_starred_ids_v1';
-const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000; // 48 giờ
+const STORAGE_CURRENT_USER_KEY = 'tech_pulse_current_user_v1';
+const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000; // 48 giờ (2 ngày)
+
+export type NewsCategoryMode = 'all' | 'ai_tech' | 'hot_vn' | 'hot_world' | 'trending';
 
 export const App: React.FC = () => {
   // Anonymous guest user ID (no login required, auto-cached)
-  const [userId] = useState<string>(() => getOrCreateUserId());
+  const [guestUserId] = useState<string>(() => getOrCreateUserId());
+
+  // Logged-in user state (null if guest)
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_CURRENT_USER_KEY);
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Active user ID for data association and backend reads
+  const activeUserId = currentUser ? currentUser.username : guestUserId;
+
+  // Auth modal open state
+  const [isAuthOpen, setIsAuthOpen] = useState<boolean>(false);
 
   // Pronunciation modal open state
   const [isPronunciationOpen, setIsPronunciationOpen] = useState<boolean>(false);
 
-  // State for raw 30 top articles from backend
+  // Category mode: 'all' (Top 30 6h) | 'ai_tech' (20 tin) | 'hot_vn' (20 tin) | 'hot_world' (20 tin) | 'trending' (20 tin)
+  const [categoryMode, setCategoryMode] = useState<NewsCategoryMode>('all');
+
+  // State for raw articles from backend
   const [topArticles, setTopArticles] = useState<Article[]>([]);
   // State for read articles fetched from backend
   const [readArticlesList, setReadArticlesList] = useState<Article[]>([]);
@@ -58,7 +81,6 @@ export const App: React.FC = () => {
           }
         });
       } else {
-        // Migrate từ v1 nếu có
         const oldSaved = localStorage.getItem('tech_pulse_read_ids_v1');
         if (oldSaved) {
           const oldIds: number[] = JSON.parse(oldSaved);
@@ -74,7 +96,7 @@ export const App: React.FC = () => {
   // Set of read article IDs derived from readMap
   const readIds = new Set(readMap.keys());
 
-  // Current active view tab: 'unread' (30 Tin Hot) | 'starred' (Tin quan tâm) | 'read' (Đã đọc 30 ngày)
+  // Current active view tab: 'unread' (Tin Mới) | 'starred' (Tin quan tâm) | 'read' (Đã đọc 48h)
   const [viewTab, setViewTab] = useState<'unread' | 'starred' | 'read'>('unread');
   // Region filter: 'all' | 'vietnam' | 'world'
   const [regionFilter, setRegionFilter] = useState<'all' | 'vietnam' | 'world'>('all');
@@ -131,7 +153,7 @@ export const App: React.FC = () => {
     const nextSet = new Set(starredIds);
     if (nextStarred) {
       nextSet.add(id);
-      // Lập tức chuyển tin này về tin chưa đọc/chưa xem (kể cả đã nghe hoặc xem rồi)
+      // Lập tức chuyển tin này về tin chưa đọc/chưa xem
       setReadMap((prev) => {
         const updated = new Map(prev);
         updated.delete(id);
@@ -156,11 +178,15 @@ export const App: React.FC = () => {
       console.error(e);
     }
 
+    // Sync to user profile if logged in
+    if (currentUser) {
+      syncUserDataApi(currentUser.username, { starred_ids: Array.from(nextSet) });
+    }
+
     // 2. Gửi request lên server để chạy Deep Synthesis và nâng cấp tóm tắt
     try {
       const res = await toggleStarArticle(id, nextStarred);
       if (res && res.article) {
-        // Cập nhật tóm tắt mới vào danh sách bài viết
         setTopArticles((prev) =>
           prev.map((a) => (a.id === id ? { ...a, ...res.article, is_starred: nextStarred } : a))
         );
@@ -175,8 +201,8 @@ export const App: React.FC = () => {
 
   // Mark article as read (Tự động xóa tin đã đọc quá 48 giờ)
   const markAsRead = useCallback((id: number) => {
-    // Lưu tức thì lên backend cho người dùng ẩn danh
-    markUserReadApi(userId, id);
+    // Lưu tức thì lên backend
+    markUserReadApi(activeUserId, id);
 
     setReadMap((prev) => {
       const next = new Map(prev);
@@ -196,12 +222,15 @@ export const App: React.FC = () => {
       }
       return next;
     });
-  }, [userId]);
+
+    if (currentUser) {
+      syncUserDataApi(currentUser.username, { read_ids: Array.from(readMap.keys()).concat(id) });
+    }
+  }, [activeUserId, currentUser, readMap]);
 
   // Mark article as unread (undo)
   const markAsUnread = (id: number) => {
-    // Hoàn tác trên backend cho người dùng ẩn danh
-    markUserUnreadApi(userId, id);
+    markUserUnreadApi(activeUserId, id);
 
     setReadMap((prev) => {
       const next = new Map(prev);
@@ -222,40 +251,106 @@ export const App: React.FC = () => {
 
   // Clear all read history
   const clearReadHistory = () => {
-    if (window.confirm('Bạn có muốn đặt lại toàn bộ danh sách đã đọc không?')) {
-      clearUserReadsApi(userId);
+    if (window.confirm('Bạn có muốn đặt lại toàn bộ danh sách đã đọc (48h) không?')) {
+      clearUserReadsApi(activeUserId);
       setReadMap(new Map());
       setReadArticlesList([]);
       try {
         localStorage.removeItem(STORAGE_READ_ITEMS_KEY);
       } catch {}
-      cleanupReadData(3).catch(() => {});
+      cleanupReadData(2).catch(() => {});
       showToast('Đã làm mới danh sách tin đã đọc');
-      // Tải lại 30 tin hot bao gồm cả các tin vừa làm mới
-      load30HotNews();
+      loadNews(categoryMode, activeUserId);
     }
   };
 
-  // Load 30 top articles from backend (loại trừ các tin đã đọc của user)
-  const load30HotNews = useCallback(async () => {
+  // Load articles from backend (theo categoryMode và loại trừ tin đã đọc)
+  const loadNews = useCallback(async (mode: NewsCategoryMode = categoryMode, uid: string = activeUserId) => {
     try {
       setIsLoading(true);
-      const data = await fetchTop6hNews(undefined, 30, userId, true);
+      let data: Article[] = [];
+      if (mode === 'all') {
+        data = await fetchTop6hNews(undefined, 30, uid, true);
+      } else {
+        data = await fetchTop20News(mode, uid, true);
+      }
       setTopArticles(data);
       if (data.length > 0) {
         VietnameseTTS.preloadArticleAudio(data[0].id, 1);
       }
     } catch (err) {
-      console.error('Error fetching 30 hot news:', err);
+      console.error('Error fetching news:', err);
     } finally {
       setIsLoading(false);
     }
-  }, [userId]);
+  }, [categoryMode, activeUserId]);
+
+  // User Login Success Handler
+  const handleLoginSuccess = (user: UserProfile) => {
+    setCurrentUser(user);
+    try {
+      localStorage.setItem(STORAGE_CURRENT_USER_KEY, JSON.stringify(user));
+    } catch {}
+
+    showToast(`👋 Xin chào, ${user.display_name || user.username}!`);
+
+    // Merge user's saved starred articles
+    if (user.starred_ids && user.starred_ids.length > 0) {
+      setStarredIds((prev) => {
+        const merged = new Set([...Array.from(prev), ...user.starred_ids]);
+        try {
+          localStorage.setItem(STORAGE_STARRED_KEY, JSON.stringify(Array.from(merged)));
+        } catch {}
+        return merged;
+      });
+    }
+
+    // Merge user's saved read articles
+    if (user.read_ids && user.read_ids.length > 0) {
+      setReadMap((prev) => {
+        const next = new Map(prev);
+        const now = Date.now();
+        user.read_ids.forEach((id) => {
+          if (!next.has(id)) next.set(id, now);
+        });
+        return next;
+      });
+    }
+
+    // Restore voice settings
+    if (user.settings?.voice) {
+      setSelectedVoice(user.settings.voice);
+      VietnameseTTS.setVoice(user.settings.voice);
+    }
+    if (user.settings?.playback_rate) {
+      setPlaybackSpeed(user.settings.playback_rate);
+      VietnameseTTS.setPlaybackRate(user.settings.playback_rate);
+    }
+
+    // Reload news for the logged-in user
+    loadNews(categoryMode, user.username);
+  };
+
+  // User Logout Handler
+  const handleLogout = () => {
+    setCurrentUser(null);
+    try {
+      localStorage.removeItem(STORAGE_CURRENT_USER_KEY);
+    } catch {}
+    showToast('Đã đăng xuất tài khoản.');
+    loadNews(categoryMode, guestUserId);
+  };
+
+  // Change category mode
+  const handleSelectCategory = (mode: NewsCategoryMode) => {
+    setCategoryMode(mode);
+    loadNews(mode, activeUserId);
+  };
 
   // Đồng bộ lịch sử đọc 2 chiều giữa client và backend server khi mở trang
   useEffect(() => {
     const localIds = Array.from(readMap.keys());
-    syncUserReadsApi(userId, localIds).then((mergedIds) => {
+    syncUserReadsApi(activeUserId, localIds).then((mergedIds) => {
       if (mergedIds && mergedIds.length > 0) {
         setReadMap((prev) => {
           const next = new Map(prev);
@@ -279,27 +374,27 @@ export const App: React.FC = () => {
         });
       }
     });
-  }, [userId]);
+  }, [activeUserId]);
 
   // Khi người dùng chuyển sang tab "Đã đọc", tự động nạp danh sách tin đã đọc từ backend
   useEffect(() => {
     if (viewTab === 'read') {
-      fetchUserReadArticles(userId, 50).then((arts) => {
+      fetchUserReadArticles(activeUserId, 50).then((arts) => {
         if (arts && arts.length > 0) {
           setReadArticlesList(arts);
         }
       }).catch(() => {});
     }
-  }, [viewTab, userId]);
+  }, [viewTab, activeUserId]);
 
   // Initial load
   useEffect(() => {
-    load30HotNews();
+    loadNews(categoryMode, activeUserId);
     fetchCrawlStatus().then(setCrawlStatus).catch(() => {});
     fetchStats().then(setStats).catch(() => {});
-    // Tự động dọn dẹp tin đã đọc cũ hơn 3 ngày (bảo toàn tin đánh dấu sao)
-    cleanupReadData(3).catch(() => {});
-  }, [load30HotNews]);
+    // Tự động dọn dẹp tin cũ hơn 2 ngày (48h)
+    cleanupReadData(2).catch(() => {});
+  }, [loadNews, activeUserId]);
 
   // Periodic poll for status
   useEffect(() => {
@@ -447,20 +542,32 @@ export const App: React.FC = () => {
     }
   };
 
-  // Handle manual trigger crawl
-  const handleTriggerCrawl = async () => {
+  // Handle manual trigger crawl with mode
+  const handleTriggerCrawl = async (mode: CrawlMode = 'all') => {
     try {
       setIsTriggering(true);
-      showToast('🚀 Đang quét tin mới từ các nguồn AI và Báo chí...');
-      await triggerCrawlNow();
+      const modeNames: Record<string, string> = {
+        all: 'tất cả nguồn tin',
+        ai_tech: '20 tin A.I & Công nghệ hot nhất',
+        hot_vn: '20 tin hot Việt Nam nổi cộm',
+        hot_world: '20 tin hot Quốc tế',
+        trending: '20 tin trending VN + QT',
+      };
+      showToast(`🚀 Đang quét ${modeNames[mode] || mode}...`);
+      await triggerCrawlNow(mode);
       const checkInterval = setInterval(async () => {
         const st = await fetchCrawlStatus();
         setCrawlStatus(st);
         if (!st.is_running) {
           clearInterval(checkInterval);
           setIsTriggering(false);
-          showToast('✅ Quét hoàn tất! Đã cập nhật 30 tin hot mới nhất.');
-          load30HotNews();
+          showToast(`✅ Quét hoàn tất! Đã tự động tạo sẵn âm thanh cho các bài viết.`);
+          if (mode !== 'all') {
+            setCategoryMode(mode as NewsCategoryMode);
+            loadNews(mode as NewsCategoryMode, activeUserId);
+          } else {
+            loadNews(categoryMode, activeUserId);
+          }
           fetchStats().then(setStats).catch(() => {});
         }
       }, 3000);
@@ -571,7 +678,9 @@ export const App: React.FC = () => {
         stats={stats}
         onTriggerCrawl={handleTriggerCrawl}
         isTriggering={isTriggering}
-        userId={userId}
+        userId={activeUserId}
+        currentUser={currentUser}
+        onOpenAuth={() => setIsAuthOpen(true)}
       />
 
       {/* Main Single Vertical Column Container */}
@@ -582,6 +691,62 @@ export const App: React.FC = () => {
         padding: '0 1rem 3rem 1rem',
         flex: 1,
       }}>
+        {/* Category Mode Selector: 4 Loại tin chọn khi quét & xem (Tìm 20 tin hot nhất nổi cộm nhất) */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.45rem',
+          overflowX: 'auto',
+          padding: '0.75rem 0 0.5rem 0',
+          marginBottom: '0.65rem',
+        }} className="hide-scrollbar">
+          {[
+            { id: 'all' as NewsCategoryMode, label: '🌟 Tất Cả (Hot 6h)', badge: 'Gồm TP.HCM' },
+            { id: 'ai_tech' as NewsCategoryMode, label: '🤖 A.I & Công Nghệ', badge: 'Top 20' },
+            { id: 'hot_vn' as NewsCategoryMode, label: '🇻🇳 Hot Việt Nam', badge: 'Top 20' },
+            { id: 'hot_world' as NewsCategoryMode, label: '🌎 Hot Quốc Tế', badge: 'Top 20' },
+            { id: 'trending' as NewsCategoryMode, label: '⚡ Trending VN + QT', badge: 'Top 20' },
+          ].map((cat) => {
+            const isActive = categoryMode === cat.id;
+            return (
+              <button
+                key={cat.id}
+                onClick={() => handleSelectCategory(cat.id)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.35rem',
+                  padding: '0.5rem 0.85rem',
+                  borderRadius: '12px',
+                  border: isActive ? '1px solid #6366f1' : '1px solid rgba(255, 255, 255, 0.08)',
+                  background: isActive
+                    ? 'linear-gradient(135deg, rgba(79, 70, 229, 0.35), rgba(99, 102, 241, 0.25))'
+                    : 'rgba(15, 23, 42, 0.6)',
+                  color: isActive ? '#fff' : 'var(--text-secondary)',
+                  fontWeight: isActive ? 700 : 500,
+                  fontSize: '0.82rem',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  boxShadow: isActive ? '0 0 12px rgba(99, 102, 241, 0.3)' : 'none',
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                <span>{cat.label}</span>
+                <span style={{
+                  fontSize: '0.65rem',
+                  padding: '0.1rem 0.35rem',
+                  borderRadius: '6px',
+                  background: isActive ? 'rgba(255, 255, 255, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                  color: isActive ? '#fff' : 'var(--text-muted)',
+                  fontWeight: 600,
+                }}>
+                  {cat.badge}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
         {/* Sticky Audio Player Bar with Speed Selector & Voice Selector */}
         <AudioPlayerBar
           currentArticle={currentPlayingArticle}
@@ -604,7 +769,7 @@ export const App: React.FC = () => {
           onOpenPronunciationModal={() => setIsPronunciationOpen(true)}
         />
 
-        {/* View Switcher Tabs: 30 Tin Hot (Chưa đọc) vs Quan Tâm (Sao) vs Đã đọc (30 ngày) */}
+        {/* View Switcher Tabs: Tin Mới (Chưa đọc) vs Quan Tâm (Sao) vs Đã đọc (48h) */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -641,7 +806,7 @@ export const App: React.FC = () => {
             }}
           >
             <Flame size={16} color={viewTab === 'unread' ? '#ff5722' : 'var(--text-muted)'} />
-            <span>🔥 30 Tin Hot ({unreadArticles.length})</span>
+            <span>🔥 {categoryMode === 'all' ? 'Tin Hot' : 'Top 20'} ({unreadArticles.length})</span>
           </button>
 
           {/* Tab 2: Tin Quan Tâm (Đánh Dấu Sao) */}
@@ -904,7 +1069,7 @@ export const App: React.FC = () => {
                   Có thể chuyển sang tab "Đã Đọc" để nghe lại, hoặc bấm nút dưới đây để quét thêm tin mới nhất.
                 </p>
                 <button
-                  onClick={handleTriggerCrawl}
+                  onClick={() => handleTriggerCrawl(categoryMode === 'all' ? 'all' : categoryMode)}
                   style={{
                     padding: '0.55rem 1.25rem',
                     borderRadius: '10px',
@@ -936,7 +1101,7 @@ export const App: React.FC = () => {
                   Chưa có tin nào trong danh sách đã đọc
                 </h3>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                  Khi bạn bấm phát nghe tin hoặc bấm "Đã đọc", tin sẽ tự động chuyển vào đây (lưu trữ 30 ngày).
+                  Khi bạn bấm phát nghe tin hoặc bấm "Đã đọc", tin sẽ tự động chuyển vào đây (tự động xóa sau 48 giờ để tránh đầy bộ nhớ).
                 </p>
               </>
             )}
@@ -991,8 +1156,18 @@ export const App: React.FC = () => {
         isOpen={isPronunciationOpen}
         onClose={() => setIsPronunciationOpen(false)}
       />
+
+      {/* Auth Modal (Login / Register / Forgot Password) */}
+      <AuthModal
+        isOpen={isAuthOpen}
+        onClose={() => setIsAuthOpen(false)}
+        onLoginSuccess={handleLoginSuccess}
+        currentUser={currentUser}
+        onLogout={handleLogout}
+      />
     </div>
   );
 };
 
 export default App;
+

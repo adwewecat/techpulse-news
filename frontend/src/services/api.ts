@@ -150,8 +150,26 @@ export async function recordArticleClick(id: number): Promise<{ click_count: num
   }
 }
 
-export async function triggerCrawlNow(): Promise<{ status: string; message: string }> {
-  const res = await fetch(`${API_BASE}/collector/trigger`, { method: 'POST' });
+export async function fetchTop20News(
+  mode: string = 'ai_tech',
+  userId?: string,
+  excludeRead: boolean = true
+): Promise<Article[]> {
+  const query = new URLSearchParams();
+  query.set('mode', mode);
+  query.set('limit', '20');
+  if (userId) {
+    query.set('user_id', userId);
+    query.set('exclude_read', String(excludeRead));
+  }
+
+  const res = await fetch(`${API_BASE}/news/top20?${query.toString()}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function triggerCrawlNow(mode: string = 'all'): Promise<{ status: string; message: string; mode_title?: string }> {
+  const res = await fetch(`${API_BASE}/collector/trigger?mode=${encodeURIComponent(mode)}`, { method: 'POST' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -193,10 +211,78 @@ export async function fetchDeepAnalysis(id: number, forceRefresh: boolean = fals
   return res.json();
 }
 
-export async function cleanupReadData(days: number = 3): Promise<{ status: string; deleted_articles: number; message: string }> {
+export async function cleanupReadData(days: number = 2): Promise<{ status: string; deleted_articles: number; message: string }> {
   const res = await fetch(`${API_BASE}/news/cleanup-read?days=${days}`, { method: 'POST' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
+}
+
+// --- AUTH API METHODS ---
+
+export async function fetchUsersCountApi(): Promise<{ count: number; max: number }> {
+  const res = await fetch(`${API_BASE}/auth/users-count`);
+  if (!res.ok) return { count: 1, max: 5 };
+  return res.json();
+}
+
+export async function loginUserApi(username: string, password: string): Promise<{ status: string; message: string; user: import('../types/news').UserProfile }> {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || `Đăng nhập thất bại (HTTP ${res.status})`);
+  }
+  return data;
+}
+
+export async function registerUserApi(username: string, password: string, displayName?: string): Promise<{ status: string; message: string; user: import('../types/news').UserProfile }> {
+  const res = await fetch(`${API_BASE}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, display_name: displayName }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || `Đăng ký thất bại (HTTP ${res.status})`);
+  }
+  return data;
+}
+
+export async function forgotPasswordApi(username: string, newPassword: string): Promise<{ status: string; message: string }> {
+  const res = await fetch(`${API_BASE}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, new_password: newPassword }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.detail || `Đổi mật khẩu thất bại (HTTP ${res.status})`);
+  }
+  return data;
+}
+
+export async function fetchUserProfileApi(username: string): Promise<import('../types/news').UserProfile> {
+  const res = await fetch(`${API_BASE}/auth/profile?username=${encodeURIComponent(username)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function syncUserDataApi(
+  username: string, 
+  data: { starred_ids?: number[]; read_ids?: number[]; settings?: any }
+): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/auth/sync?username=${encodeURIComponent(username)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch (e) {
+    console.warn('Lỗi sync user data:', e);
+  }
 }
 
 export interface PronunciationItem {

@@ -40,6 +40,8 @@ class ArticleOut(BaseModel):
     is_primary: bool = True
     is_starred: bool = False
     deep_analysis: Optional[str] = None
+    special_type: Optional[str] = None
+    special_date: Optional[str] = None
     related_sources_count: int = 1
     related_articles: List[RelatedArticle] = []
 
@@ -127,6 +129,8 @@ class ArticleOut(BaseModel):
             is_primary=bool(g("is_primary", True)),
             is_starred=bool(g("is_starred", False)),
             deep_analysis=g("deep_analysis"),
+            special_type=g("special_type"),
+            special_date=g("special_date"),
             related_sources_count=max(source_count, len(rel_list) + 1),
             related_articles=rel_list
         )

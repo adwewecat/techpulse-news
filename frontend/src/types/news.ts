@@ -17,7 +17,7 @@ export interface Article {
   source_domain: string;
   source_tier: number;
   region: 'vietnam' | 'world';
-  category: 'hot_vn' | 'tech_vn' | 'tech_world' | 'special';
+  category: 'hot_vn' | 'tech_vn' | 'tech_world' | 'hot_world' | 'special';
   summary_short?: string | null;
   summary_bullets: string[];
   image_url?: string | null;
@@ -33,6 +33,8 @@ export interface Article {
   is_primary: boolean;
   is_starred?: boolean;
   deep_analysis?: string | null;
+  special_type?: string | null;
+  special_date?: string | null;
   related_sources_count: number;
   related_articles: RelatedArticle[];
 }
@@ -85,6 +87,7 @@ export interface CrawlLog {
   articles_new: number;
   status: string;
   error_message?: string | null;
+  mode?: string;
 }
 
 export interface CrawlStatus {
@@ -107,3 +110,27 @@ export interface StatsOverview {
 }
 
 export type MainTab = 'all' | 'vietnam' | 'world' | 'top6h' | 'trending';
+
+export type CrawlMode = 'all' | 'ai_tech' | 'hot_vn' | 'hot_world' | 'trending';
+
+export interface UserProfile {
+  id: string;
+  username: string;
+  role: 'admin' | 'user';
+  display_name?: string;
+  created_at: string;
+  starred_ids: number[];
+  read_ids: number[];
+  settings: {
+    voice?: string;
+    playback_rate?: number;
+    autoplay?: boolean;
+    [key: string]: any;
+  };
+}
+
+export interface UsersCountInfo {
+  count: number;
+  max: number;
+}
+
