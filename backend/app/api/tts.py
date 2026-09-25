@@ -82,6 +82,15 @@ COMMON_EN_WORDS = {
     'court', 'police', 'company', 'startup', 'model', 'models', 'billion', 'million'
 }
 
+VIETNAMESE_DIACRITICS = set('àáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ')
+
+VI_STOPWORDS = {
+    'và', 'là', 'của', 'trong', 'được', 'có', 'cho', 'với', 'về', 'các', 'những',
+    'một', 'này', 'khi', 'đã', 'sẽ', 'đang', 'từ', 'theo', 'ra', 'đến', 'nhiều',
+    'người', 'ngày', 'năm', 'thì', 'lại', 'trên', 'đó', 'bởi', 'để', 'như', 'tại',
+    'bị', 'vào', 'hơn', 'cũng', 'phải', 'hay', 'sau', 'nói', 'biết', 'tin', 'bài'
+}
+
 def needs_vi_translation(text: str) -> bool:
     """Xác định chính xác văn bản có chứa tiếng Anh hoặc cần dịch sang tiếng Việt hay không"""
     if not text or not text.strip():

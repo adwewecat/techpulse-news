@@ -454,8 +454,8 @@ export const App: React.FC = () => {
     },
     onError: (err: any, article: Article) => {
       console.warn('Lỗi âm thanh bài:', article.title, err);
-      markAsRead(article.id);
-      showToast(`⚠️ Bỏ qua tin bị sự cố âm thanh: ${article.title.substring(0, 30)}...`);
+      // Không đánh dấu là đã đọc nếu bài bị lỗi âm thanh
+      showToast(`⚠️ Không thể phát âm thanh: ${article.title.substring(0, 30)}...`);
     }
   }), [markAsRead]);
 
@@ -474,16 +474,21 @@ export const App: React.FC = () => {
     VietnameseTTS.startPlaylist(playlist, 0, ttsCallbacks, selectedVoice);
   }, [topArticles, readIds, autoplayNext, selectedVoice, ttsCallbacks]);
 
-  // Phát toàn bộ 30 tin hot từ đầu
+  // Phát toàn bộ tin hot từ đầu
   const handlePlayAll = () => {
     const unread = topArticles.filter((a) => !readIds.has(a.id));
-    if (unread.length > 0) {
-      setPlayingArticleId(unread[0].id);
+    const listToPlay = unread.length > 0 ? unread : topArticles;
+
+    if (listToPlay.length > 0) {
+      setPlayingArticleId(listToPlay[0].id);
       setIsPaused(false);
       VietnameseTTS.setAutoplay(autoplayNext);
-      VietnameseTTS.startPlaylist(unread, 0, ttsCallbacks, selectedVoice);
+      VietnameseTTS.startPlaylist(listToPlay, 0, ttsCallbacks, selectedVoice);
+      if (unread.length === 0) {
+        showToast('🔁 Đang phát lại toàn bộ danh sách tin...');
+      }
     } else {
-      showToast('Tất cả 30 tin đã được đọc!');
+      showToast('Không có bài viết nào để phát!');
     }
   };
 

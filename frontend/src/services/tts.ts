@@ -26,6 +26,7 @@ export class VietnameseTTS {
 
   // WakeLock để ngăn CPU điện thoại ngủ đông sâu khi phát audio
   private static wakeLock: any = null;
+  private static consecutiveErrors: number = 0;
 
   public static setVoice(voice: string) {
     this.currentVoice = voice;
@@ -221,6 +222,7 @@ export class VietnameseTTS {
     this.playlist = [...articles];
     this.currentIndex = Math.max(0, Math.min(startIndex, articles.length - 1));
     this.callbacks = callbacks || {};
+    this.consecutiveErrors = 0;
     if (voice) {
       this.setVoice(voice);
     }
@@ -288,6 +290,7 @@ export class VietnameseTTS {
 
     audio.onplay = () => {
       applyRate();
+      this.consecutiveErrors = 0;
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
@@ -310,6 +313,7 @@ export class VietnameseTTS {
     // Chuyển bài ĐỒNG BỘ trong cùng luồng sự kiện để iOS Safari / Android Chrome không tắt web
     audio.onended = () => {
       this.isPausedState = false;
+      this.consecutiveErrors = 0;
       const finishedArticle = this.playlist[this.currentIndex];
       const finishedRank = this.currentIndex + 1;
 
@@ -341,17 +345,27 @@ export class VietnameseTTS {
       }
       console.error('Lỗi khi phát audio bài viết:', e, audio.error);
       this.isPausedState = false;
+      this.consecutiveErrors++;
 
       if (this.callbacks.onError) {
         this.callbacks.onError(e, currentArticle);
       }
 
-      // Tự động bỏ qua bài lỗi và phát bài tiếp theo sau 200ms để không bị kẹt
+      // Nếu gặp 3 bài lỗi liên tiếp (ví dụ rớt mạng hoặc backend tắt), dừng phát ngay thay vì tua sạch cả list
+      if (this.consecutiveErrors >= 3) {
+        console.warn('Đã gặp 3 lỗi âm thanh liên tiếp, tạm dừng phát tự động.');
+        this.stop();
+        return;
+      }
+
+      // Tự động bỏ qua bài lỗi và phát bài tiếp theo sau 300ms để không bị kẹt
       if (this.isContinuousAutoplay && this.currentIndex + 1 < this.playlist.length) {
         this.currentIndex++;
         setTimeout(() => {
           this.playCurrentTrack();
-        }, 200);
+        }, 300);
+      } else {
+        this.stop();
       }
     };
 
@@ -362,9 +376,6 @@ export class VietnameseTTS {
           return;
         }
         console.warn('Lỗi audio.play():', err);
-        if (this.callbacks.onError) {
-          this.callbacks.onError(err, currentArticle);
-        }
       });
     }
   }

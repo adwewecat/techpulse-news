@@ -455,9 +455,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       outline: 'none',
                     }}
                   />
-                  <span style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.4)', marginTop: '0.2rem', display: 'block' }}>
-                    * Mặc định tài khoản admin có mật khẩu: <strong style={{ color: '#a5b4fc' }}>admin1230</strong>
-                  </span>
                 </div>
 
                 <button
