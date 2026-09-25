@@ -29,6 +29,10 @@ async def lifespan(app: FastAPI):
         # 2. Cập nhật ngay tin đặc biệt theo giờ: Thời tiết TP.HCM (Hôm nay D & Ngày mai D+1) và Giá vàng Mi Hồng
         from app.services.special_feeds import upsert_special_feeds
         await upsert_special_feeds(storage)
+
+        # 3. Quét ngầm và tự động dịch 100% tiếng Việt cho các bài viết quốc tế còn sót tiếng Anh
+        from app.services.auto_translator import auto_translate_all_pending_articles
+        asyncio.create_task(auto_translate_all_pending_articles(storage))
     except Exception as e:
         logger.error(f"Lỗi khi nạp dữ liệu storage hoặc tin đặc biệt: {e}")
         count = len(storage.articles)

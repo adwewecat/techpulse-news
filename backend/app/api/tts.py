@@ -72,14 +72,11 @@ def clean_script_for_tts(script: str) -> str:
     return script
 
 COMMON_EN_WORDS = {
-    'the', 'of', 'and', 'to', 'in', 'is', 'that', 'for', 'it', 'as', 'was',
-    'with', 'on', 'at', 'by', 'from', 'this', 'are', 'be', 'has', 'have',
-    'had', 'an', 'which', 'will', 'about', 'can', 'their', 'more', 'how', 'why',
-    'after', 'years', 'space', 'border', 'new', 'what', 'who', 'where', 'when',
-    'said', 'all', 'into', 'would', 'could', 'were', 'over', 'its', 'such', 'also',
-    'they', 'them', 'first', 'other', 'most', 'been', 'than', 'some', 'time', 'announced',
-    'launches', 'unveils', 'feature', 'features', 'released', 'updates', 'report', 'claims',
-    'court', 'police', 'company', 'startup', 'model', 'models', 'billion', 'million'
+    'the', 'of', 'and', 'with', 'from', 'this', 'that', 'they', 'them',
+    'which', 'will', 'about', 'their', 'there', 'what', 'when', 'where',
+    'would', 'could', 'should', 'been', 'have', 'were', 'also', 'such',
+    'announced', 'launches', 'unveils', 'feature', 'features', 'released',
+    'updates', 'report', 'claims', 'company', 'startup', 'billion', 'million'
 }
 
 VIETNAMESE_DIACRITICS = set('àáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ')
@@ -108,18 +105,25 @@ def needs_vi_translation(text: str) -> bool:
     en_matches = sum(1 for w in words if w in COMMON_EN_WORDS)
     vi_matches = sum(1 for w in words if w in VI_STOPWORDS)
 
-    # 1. Có từ tiếng Anh phổ biến rõ rệt
-    if en_matches >= 1 and (en_matches >= vi_matches or vi_matches == 0):
-        return True
-    if en_matches >= 2:
-        return True
-
-    # 2. Hoàn toàn không có dấu tiếng Việt nào và có >= 2 từ
+    # 1. Hoàn toàn không có dấu tiếng Việt nào và có >= 2 từ
     if vi_chars == 0 and len(words) >= 2:
         return True
 
-    # 3. Tỷ lệ ký tự dấu tiếng Việt quá thấp (< 2.5%) trong câu dài mà có từ tiếng Anh
-    if len(clean_text) > 25 and (vi_chars / len(clean_text)) < 0.025 and en_matches > 0:
+    # 2. Nếu có ký tự dấu tiếng Việt rõ rệt (>= 3 ký tự dấu) và không có từ tiếng Anh đặc thù
+    if vi_chars >= 3 and (vi_chars / len(clean_text)) > 0.05 and en_matches == 0:
+        return False
+
+    # 3. Có từ tiếng Anh đặc thù xuất hiện
+    if en_matches >= 1:
+        if vi_matches > en_matches and vi_chars >= 5:
+            return False
+        if en_matches >= 2 or vi_chars < 3:
+            return True
+        if en_matches > vi_matches:
+            return True
+
+    # 4. Tỷ lệ ký tự dấu tiếng Việt quá thấp (< 3%) trong câu dài >= 30 ký tự
+    if len(clean_text) >= 30 and (vi_chars / len(clean_text)) < 0.03:
         return True
 
     return False
@@ -131,6 +135,29 @@ def is_vietnamese_text(text: str) -> bool:
 def is_english_text(text: str) -> bool:
     """Xác định văn bản có cần dịch sang tiếng Việt hay không"""
     return needs_vi_translation(text)
+
+async def _translate_raw_chunk(chunk: str, client: httpx.AsyncClient, force_en: bool = False) -> str:
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": "en" if force_en else "auto",
+        "tl": "vi",
+        "dt": "t",
+        "q": chunk[:3500]
+    }
+    try:
+        res = await client.get(url, params=params, headers=HEADERS, timeout=8.0)
+        if res.status_code == 200:
+            data = res.json()
+            trans = "".join([part[0] for part in data[0] if part and len(part) > 0 and part[0]])
+            if trans and trans.strip():
+                # Nếu auto-detect không dịch (trả về y nguyên) mà câu vẫn chứa tiếng Anh, ép dịch với sl=en
+                if not force_en and trans.strip() == chunk.strip() and needs_vi_translation(chunk):
+                    return await _translate_raw_chunk(chunk, client, force_en=True)
+                return trans.strip()
+    except Exception as e:
+        logger.warning(f"Lỗi dịch chunk: {e}")
+    return chunk
 
 async def translate_to_vietnamese(text: str, client: httpx.AsyncClient) -> str:
     """Dịch tiêu đề hoặc nội dung tiếng nước ngoài sang Tiếng Việt chuẩn xác 100%"""
@@ -145,23 +172,45 @@ async def translate_to_vietnamese(text: str, client: httpx.AsyncClient) -> str:
         return clean_text
 
     try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {
-            "client": "gtx",
-            "sl": "auto",
-            "tl": "vi",
-            "dt": "t",
-            "q": clean_text[:3500]
-        }
-        res = await client.get(url, params=params, headers=HEADERS, timeout=8.0)
-        if res.status_code == 200:
-            data = res.json()
-            translated = "".join([part[0] for part in data[0] if part and len(part) > 0 and part[0]])
-            if translated and translated.strip():
-                return clean_script_for_tts(translated.strip())
+        # Nếu đoạn văn gồm nhiều câu hoặc câu hỗn hợp tiếng Anh - tiếng Việt:
+        # Tách từng câu để dịch triệt để các câu tiếng Anh mà không bị lẫn lộn ngôn ngữ
+        sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean_text) if s.strip()]
+        if len(sents) > 1:
+            trans_sents = []
+            for s in sents:
+                if needs_vi_translation(s):
+                    tr = await _translate_raw_chunk(s, client)
+                    trans_sents.append(clean_script_for_tts(tr))
+                else:
+                    trans_sents.append(s)
+            result = " ".join(trans_sents)
+            if result and result.strip():
+                return clean_script_for_tts(result.strip())
+
+        # Nếu chỉ có 1 câu đơn
+        tr = await _translate_raw_chunk(clean_text, client)
+        if tr and tr.strip():
+            return clean_script_for_tts(tr.strip())
     except Exception as e:
         logger.warning(f"Error translating text: {e}")
     return clean_text
+
+def clear_article_audio_cache(article_id: int):
+    """Xóa sạch bộ nhớ đệm âm thanh RAM và file Disk mp3 của một bài viết cụ thể"""
+    for k in list(AUDIO_CACHE.keys()):
+        if f"art_{article_id}_" in k or f"deep_speech_{article_id}_" in k:
+            AUDIO_CACHE.pop(k, None)
+    for f in AUDIO_CACHE_DIR.glob(f"art_{article_id}_*.mp3"):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
+    for f in AUDIO_CACHE_DIR.glob(f"deep_speech_{article_id}_*.mp3"):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
+
 
 def split_text_for_tts(text: str, max_length: int = 170) -> List[str]:
     """Tách văn bản thành các đoạn ngắn tự nhiên để gửi tới TTS API (cho Google TTS fallback)"""
@@ -485,41 +534,51 @@ async def get_article_speech(
     selected_voice = voice if voice in valid_voice_ids else DEFAULT_VOICE
     cache_key = f"art_{article_id}_r_{rank}_{selected_voice}"
 
-    # 1. Kiểm tra RAM cache
-    if cache_key in AUDIO_CACHE and len(AUDIO_CACHE[cache_key]) > 1000:
-        cached_data = AUDIO_CACHE[cache_key]
-        return Response(
-            content=cached_data,
-            media_type="audio/mpeg",
-            headers={
-                "Content-Type": "audio/mpeg",
-                "Content-Length": str(len(cached_data)),
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "public, max-age=86400"
-            }
-        )
+    art = storage.get_article_by_id(article_id)
+    if not art:
+        raise HTTPException(status_code=404, detail="Không tìm thấy bài viết")
 
-    # 2. Kiểm tra Disk Cache
-    disk_file = AUDIO_CACHE_DIR / f"{cache_key}.mp3"
-    if disk_file.exists():
-        try:
-            cached_bytes = disk_file.read_bytes()
-            if len(cached_bytes) > 1000:
-                AUDIO_CACHE[cache_key] = cached_bytes
-                return Response(
-                    content=cached_bytes,
-                    media_type="audio/mpeg",
-                    headers={
-                        "Content-Type": "audio/mpeg",
-                        "Content-Length": str(len(cached_bytes)),
-                        "Accept-Ranges": "bytes",
-                        "Cache-Control": "public, max-age=86400"
-                    }
-                )
-            else:
-                disk_file.unlink(missing_ok=True)
-        except Exception:
-            pass
+    # Kiểm tra xem bài viết còn tiếng Anh chưa dịch không:
+    # Nếu còn tiếng Anh, bắt buộc xóa cache âm thanh cũ và tiến hành dịch chuẩn 100% tiếng Việt
+    needs_trans = needs_vi_translation(art.get("title", "")) or needs_vi_translation(art.get("summary_short", ""))
+    if needs_trans:
+        clear_article_audio_cache(article_id)
+    else:
+        # 1. Kiểm tra RAM cache
+        if cache_key in AUDIO_CACHE and len(AUDIO_CACHE[cache_key]) > 1000:
+            cached_data = AUDIO_CACHE[cache_key]
+            return Response(
+                content=cached_data,
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Type": "audio/mpeg",
+                    "Content-Length": str(len(cached_data)),
+                    "Accept-Ranges": "bytes",
+                    "Cache-Control": "public, max-age=86400"
+                }
+            )
+
+        # 2. Kiểm tra Disk Cache
+        disk_file = AUDIO_CACHE_DIR / f"{cache_key}.mp3"
+        if disk_file.exists():
+            try:
+                cached_bytes = disk_file.read_bytes()
+                if len(cached_bytes) > 1000:
+                    AUDIO_CACHE[cache_key] = cached_bytes
+                    return Response(
+                        content=cached_bytes,
+                        media_type="audio/mpeg",
+                        headers={
+                            "Content-Type": "audio/mpeg",
+                            "Content-Length": str(len(cached_bytes)),
+                            "Accept-Ranges": "bytes",
+                            "Cache-Control": "public, max-age=86400"
+                        }
+                    )
+                else:
+                    disk_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     # 3. Chống request trùng lặp (In-flight request deduplication)
     if cache_key in IN_FLIGHT_SYNTHESIS:
@@ -538,10 +597,6 @@ async def get_article_speech(
                 )
         except Exception:
             pass
-
-    art = storage.get_article_by_id(article_id)
-    if not art:
-        raise HTTPException(status_code=404, detail="Không tìm thấy bài viết")
 
     loop = asyncio.get_running_loop()
     future = loop.create_future()

@@ -407,7 +407,14 @@ async def run_crawl_cycle(storage_instance: Optional[JSONStorage] = None, mode: 
             "error_message": None
         })
 
-        # 8. LẬP TỨC TẠO FILE ÂM THANH NGẦM CHO CÁC TIN MỚI & TIN NỔI BẬT NHẤT
+        # 8. Chuẩn hóa dịch Tiếng Việt triệt để 100% cho mọi tin mới
+        try:
+            from app.services.auto_translator import auto_translate_all_pending_articles
+            await auto_translate_all_pending_articles(st)
+        except Exception as trans_err:
+            logger.warning(f"Lỗi chuẩn hóa dịch tự động: {trans_err}")
+
+        # 9. LẬP TỨC TẠO FILE ÂM THANH NGẦM CHO CÁC TIN MỚI & TIN NỔI BẬT NHẤT
         top_articles_for_audio = st.get_top_6h_articles(limit=20)
         asyncio.create_task(pre_generate_audio_for_new_articles(top_articles_for_audio, st))
 
